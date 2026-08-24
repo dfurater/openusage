@@ -227,6 +227,28 @@ extension ZAIUsageError: CategorizedError {
     }
 }
 
+extension NousAuthError: CategorizedError {
+    var errorCategory: ErrorCategory {
+        switch self {
+        case .notLoggedIn: .notLoggedIn
+        case .tokenExpired: .authExpired
+        case .credentialRejected: .authExpired
+        case .unreadableState: .credentialAccess
+        case .saveFailed, .deleteFailed: .other
+        }
+    }
+}
+
+extension NousUsageError: CategorizedError {
+    var errorCategory: ErrorCategory {
+        switch self {
+        case .connectionFailed: .network
+        case .invalidResponse: .decoding
+        case .requestFailed(let status): ErrorCategory.http(status)
+        }
+    }
+}
+
 extension HTTPClientError: CategorizedError {
     var errorCategory: ErrorCategory {
         switch self {

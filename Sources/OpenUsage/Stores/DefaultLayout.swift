@@ -33,6 +33,10 @@ enum DefaultLayout {
         "openrouter.credits", "openrouter.balance",
         "openrouter.today", "openrouter.week", "openrouter.month", "openrouter.keyLimit",
 
+        // Nous: Cap meter + Credits stay above the fold; Balance and the raw credits-left row sit
+        // below the caret.
+        "nous.monthlyCap", "nous.credits", "nous.balance", "nous.creditsLeft",
+
         "zai.session", "zai.weekly", "zai.webSearches"
     ]
 
@@ -101,6 +105,8 @@ enum DefaultLayout {
         // OpenRouter: Credits meter + Balance stay above the fold; period spend and the per-key cap
         // sit below the caret.
         "openrouter.today", "openrouter.week", "openrouter.month", "openrouter.keyLimit",
+        // Nous: the two meters stay above the fold; Balance and Credits Left sit below the caret.
+        "nous.balance", "nous.creditsLeft",
         // Z.ai: Session meter stays above the fold; Web Searches (monthly count) sits below the caret.
         "zai.webSearches"
     ]

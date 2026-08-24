@@ -17,6 +17,7 @@ enum ProviderCatalog {
             GrokProvider(),
             OpenCodeProvider(),
             OpenRouterProvider(),
+            NousProvider(),
             ZAIProvider()
         ]
     }

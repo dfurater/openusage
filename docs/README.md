@@ -32,6 +32,7 @@ What each provider tracks, where its credentials come from, and what to do when 
 - [Grok](providers/grok.md)
 - [OpenCode](providers/opencode.md)
 - [OpenRouter](providers/openrouter.md)
+- [Nous](providers/nous.md)
 - [Z.ai](providers/zai.md)
 
 ## For developers
