@@ -301,6 +301,25 @@ final class StatusItemController: NSObject {
         showPanel()
     }
 
+    var isPopoverVisible: Bool { panel.isVisible }
+
+    /// Account ownership can change while the app remains open. Remove the old status item and
+    /// observers before installing the graph's replacement, otherwise both controllers stay visible.
+    func shutdown() {
+        if panel.isVisible {
+            hidePanel()
+        } else {
+            outsideClickMonitor.stop()
+            panel.orderOut(nil)
+        }
+        if let appearanceObserver {
+            NotificationCenter.default.removeObserver(appearanceObserver)
+            self.appearanceObserver = nil
+        }
+        statusItem.button?.target = nil
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
     private func showPanel() {
         guard let button = statusItem.button, let buttonWindow = button.window else {
             AppLog.error(.statusItem, "Cannot show panel: status item has no button")

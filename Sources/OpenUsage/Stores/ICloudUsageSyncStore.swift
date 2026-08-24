@@ -90,10 +90,12 @@ actor ICloudUsageHistoryFileStore: UsageHistoryFileStoring {
     }
 
     func write(_ document: UsageHistoryDocument) async throws {
+        try Task.checkCancellation()
         try document.validate()
         let directory = try historyDirectory(create: true)
         let url = directory.appendingPathComponent(document.deviceID).appendingPathExtension("json")
         let data = try encoder.encode(document)
+        try Task.checkCancellation()
         try coordinatedWrite(data, to: url)
     }
 
@@ -160,9 +162,11 @@ final class ICloudUsageSyncStore {
     private let writeDebounce: Duration
     private let observesMetadataChanges: Bool
     private var writeTask: Task<Void, Never>?
+    private var activationTask: Task<Void, Never>?
     private var metadataQuery: NSMetadataQuery?
     private var notificationTokens: [NSObjectProtocol] = []
     private var syncActivityCount = 0
+    private var isShutDownForAccountGraphReload = false
 
     let deviceID: String
     let deviceName: String
@@ -170,7 +174,7 @@ final class ICloudUsageSyncStore {
         didSet {
             guard enabled != oldValue else { return }
             defaults.set(enabled, forKey: Self.enabledKey)
-            Task { await applyEnabledChange() }
+            activationTask = Task { [weak self] in await self?.applyEnabledChange() }
         }
     }
     private(set) var isSyncing = false
@@ -199,7 +203,7 @@ final class ICloudUsageSyncStore {
         self.enabled = defaults.bool(forKey: Self.enabledKey)
         dataStore.onLocalHistoryChanged = { [weak self] in self?.scheduleWrite() }
         if enabled {
-            Task { await applyEnabledChange() }
+            activationTask = Task { [weak self] in await self?.applyEnabledChange() }
         }
     }
 
@@ -212,20 +216,36 @@ final class ICloudUsageSyncStore {
     }
 
     func scheduleWrite() {
-        guard enabled else { return }
+        guard enabled, !isShutDownForAccountGraphReload else { return }
         writeTask?.cancel()
         writeTask = Task { [weak self] in
             guard let self else { return }
             try? await Task.sleep(for: writeDebounce)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, !isShutDownForAccountGraphReload else { return }
             await writeNow()
         }
     }
 
+    /// Retire this graph's sync worker before its replacement starts writing the same device file.
+    /// Unlike turning sync off, a graph reload keeps both the user's preference and the existing
+    /// iCloud document intact; the replacement worker immediately rewrites that document itself.
+    func shutdownForAccountGraphReload() {
+        guard !isShutDownForAccountGraphReload else { return }
+        isShutDownForAccountGraphReload = true
+        writeTask?.cancel()
+        writeTask = nil
+        activationTask?.cancel()
+        activationTask = nil
+        dataStore.onLocalHistoryChanged = nil
+        stopObserving()
+    }
+
     private func applyEnabledChange() async {
+        guard !isShutDownForAccountGraphReload else { return }
         if enabled {
             startObserving()
             await reload()
+            guard !isShutDownForAccountGraphReload, !Task.isCancelled else { return }
             await writeNow()
         } else {
             writeTask?.cancel()
@@ -243,8 +263,9 @@ final class ICloudUsageSyncStore {
     }
 
     private func writeNow() async {
-        guard enabled else { return }
+        guard enabled, !isShutDownForAccountGraphReload, !Task.isCancelled else { return }
         await withSyncActivity {
+            guard enabled, !isShutDownForAccountGraphReload, !Task.isCancelled else { return }
             let document = dataStore.localHistoryDocument(
                 deviceID: deviceID,
                 deviceName: deviceName
@@ -257,21 +278,23 @@ final class ICloudUsageSyncStore {
                     try await fileStore.delete(deviceID: deviceID)
                     return
                 }
+                guard !isShutDownForAccountGraphReload, !Task.isCancelled else { return }
                 operationError = nil
                 await reload()
             } catch {
+                guard !isShutDownForAccountGraphReload, !Task.isCancelled else { return }
                 report(error, context: "write")
             }
         }
     }
 
     private func reload() async {
-        guard enabled else { return }
+        guard enabled, !isShutDownForAccountGraphReload, !Task.isCancelled else { return }
         await withSyncActivity {
             do {
                 let result = try await fileStore.loadDocuments()
                 // A read that began while enabled must not restore peer state after sync was disabled.
-                guard enabled else { return }
+                guard enabled, !isShutDownForAccountGraphReload, !Task.isCancelled else { return }
                 documents = UsageHistoryDocument.newestByDevice(result.documents)
                 invalidFileMessages = result.invalidFileMessages
                 dataStore.setPeerHistoryDocuments(result.documents, ownDeviceID: deviceID)
@@ -279,6 +302,7 @@ final class ICloudUsageSyncStore {
                     ? nil
                     : "Some synced usage data couldn’t be read. Check the log for details."
             } catch {
+                guard !isShutDownForAccountGraphReload, !Task.isCancelled else { return }
                 report(error, context: "read")
             }
         }

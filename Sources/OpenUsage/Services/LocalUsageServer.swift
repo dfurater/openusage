@@ -50,6 +50,15 @@ final class LocalUsageServer {
         self.listener = listener
     }
 
+    /// Release the loopback port before replacing the account-owned runtime graph. Waiting for
+    /// deallocation is insufficient because Network retains its listener handlers asynchronously.
+    func stop() {
+        listener?.stateUpdateHandler = nil
+        listener?.newConnectionHandler = nil
+        listener?.cancel()
+        listener = nil
+    }
+
     private func accept(_ connection: NWConnection) {
         connection.start(queue: queue)
         guard activeConnections < Self.maxConcurrentConnections else {

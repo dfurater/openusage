@@ -48,6 +48,85 @@ final class ShareCardRendererTests: XCTestCase {
         XCTAssertGreaterThan(rep.pixelsHigh, 0)
     }
 
+    func testMultiAccountShareCardsRenderDistinctAccountLabels() throws {
+        let provider = MockData.claude
+        let personalProvider = Provider(
+            id: "claude@ab12cd34",
+            displayName: "Claude — Personal",
+            icon: provider.icon
+        )
+        let teamRows = [
+            WidgetData(title: "Session", icon: provider.icon, kind: .percent, used: 22, limit: 100),
+            WidgetData(title: "Weekly", icon: provider.icon, kind: .percent, used: 41, limit: 100)
+        ]
+        let personalRows = [
+            WidgetData(title: "Session", icon: provider.icon, kind: .percent, used: 68, limit: 100),
+            WidgetData(title: "Weekly", icon: provider.icon, kind: .percent, used: 18, limit: 100)
+        ]
+        let team = ShareCardView(
+            provider: provider,
+            plan: "Team",
+            rows: teamRows,
+            appearance: .dark,
+            displayNameOverride: "Claude — SUNSTORY"
+        )
+        let personal = ShareCardView(
+            provider: personalProvider,
+            plan: "Max",
+            rows: personalRows,
+            appearance: .dark,
+            displayNameOverride: "Claude — Personal"
+        )
+
+        XCTAssertNotEqual(team.displayNameOverride, personal.displayNameOverride)
+
+        let total = TotalSpend(period: .today, slices: [
+            TotalSpendSlice(
+                provider: provider,
+                title: "Claude — SUNSTORY",
+                amountUSD: 12.40,
+                tokenCount: 850_000,
+                estimated: true
+            ),
+            TotalSpendSlice(
+                provider: personalProvider,
+                title: "Claude — Personal",
+                amountUSD: 7.80,
+                tokenCount: 650_000,
+                estimated: true
+            ),
+            TotalSpendSlice(
+                provider: MockData.codex,
+                title: "Codex",
+                amountUSD: 4.20,
+                tokenCount: 330_000,
+                estimated: true
+            )
+        ])
+        XCTAssertEqual(
+            total.projection(for: .cost).slices.map(\.title),
+            ["Claude — SUNSTORY", "Claude — Personal", "Codex"]
+        )
+
+        let firstImage = try XCTUnwrap(ShareCardRenderer.image(for: team))
+        let stackedImage = try XCTUnwrap(ShareCardRenderer.image(for: VStack(spacing: 0) {
+            TotalSpendShareCardView(total: total, metric: .cost, appearance: .dark)
+            team
+            personal
+        }))
+        let firstRepresentation = try XCTUnwrap(firstImage.representations.first)
+        let stackedRepresentation = try XCTUnwrap(stackedImage.representations.first)
+        XCTAssertGreaterThan(stackedRepresentation.pixelsHigh, firstRepresentation.pixelsHigh)
+
+        let png = try XCTUnwrap(ShareCardRenderer.pngData(from: stackedImage))
+        XCTAssertNotNil(NSImage(data: png))
+
+        // Opt-in screenshot generation uses fixture values, never a user's real account usage.
+        if let screenshotPath = ProcessInfo.processInfo.environment["OPENUSAGE_SCREENSHOT_PATH"] {
+            try png.write(to: URL(fileURLWithPath: screenshotPath), options: .atomic)
+        }
+    }
+
     func testCondensedTextRowIndicesFollowsNeighborRule() {
         let rows = MockData.descriptors(for: MockData.claude.id).map { $0.sample }
         XCTAssertGreaterThan(rows.count, 1, "sample fixture should have multiple rows")

@@ -400,6 +400,55 @@ final class ClaudeProviderTests: XCTestCase {
         XCTAssertTrue(httpClient.requests.contains { $0.url.absoluteString == "https://api.anthropic.com/api/oauth/usage" })
     }
 
+    func testSubscriptionDowngradeUpdatesPlanWithoutChangingAccountOrBillingLookup() async {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let identityPath = "/tmp/claude/.claude.json"
+        let credentialsPath = "/tmp/claude/.credentials.json"
+        let files = FakeFiles([
+            identityPath:
+                #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"PERSONAL"}}"#,
+            credentialsPath:
+                #"{"claudeAiOauth":{"accessToken":"same-account-token","subscriptionType":"max","rateLimitTier":"default_claude_max_20x","scopes":["user:profile"]}}"#,
+        ])
+        let httpClient = FakeHTTPClient(response: HTTPResponse(
+            statusCode: 200,
+            headers: [:],
+            body: Data(#"{"five_hour":{"utilization":25}}"#.utf8)
+        ))
+        let provider = ClaudeProvider(
+            provider: ClaudeProvider.makeProvider(
+                id: "claude@deadbeef",
+                displayName: "Claude — Personal"
+            ),
+            authStore: ClaudeAuthStore(
+                environment: FakeEnvironment(["CLAUDE_CONFIG_DIR": "/tmp/claude"]),
+                files: files,
+                keychain: FakeKeychain(),
+                now: { now }
+            ),
+            usageClient: ClaudeUsageClient(httpClient: httpClient),
+            logUsageScanner: ClaudeLogFixture.scanner(home: nil),
+            now: { now },
+            pricing: { TestPricing.bundled },
+            expectedIdentityKey: "account-a|personal"
+        )
+
+        let maxSnapshot = await provider.refresh()
+        XCTAssertEqual(maxSnapshot.plan, "Max 20x")
+
+        files.files[credentialsPath] =
+            #"{"claudeAiOauth":{"accessToken":"same-account-token","subscriptionType":"pro","rateLimitTier":"default_claude_pro","scopes":["user:profile"]}}"#
+        let downgradedSnapshot = await provider.refresh()
+
+        XCTAssertEqual(downgradedSnapshot.plan, "Pro")
+        XCTAssertEqual(maxSnapshot.providerID, "claude@deadbeef")
+        XCTAssertEqual(downgradedSnapshot.providerID, maxSnapshot.providerID)
+        XCTAssertEqual(httpClient.requests.count, 2)
+        XCTAssertTrue(httpClient.requests.allSatisfy {
+            $0.url.absoluteString == "https://api.anthropic.com/api/oauth/usage"
+        })
+    }
+
     func testNoCredentialsStillScansLocalSpendAndPreservesNotLoggedInWarning() async throws {
         let now = OpenUsageISO8601.date(from: "2026-02-20T16:00:00.000Z")!
         let home = try ClaudeLogFixture.makeHome(files: [

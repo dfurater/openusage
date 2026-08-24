@@ -17,6 +17,10 @@ final class CodexProvider: ProviderRuntime {
     let logUsageScanner: CodexLogUsageScanner
     let now: @Sendable () -> Date
     let pricing: @Sendable () async -> ModelPricing
+    /// Identity proven by the credential that produced the most recent successful snapshot.
+    /// Keychain-backed accounts cannot be identified during prompt-free launch discovery, but a
+    /// normal refresh already reads that credential and can safely expose its account id afterward.
+    private(set) var lastSuccessfulIdentityKey: String?
 
     init(
         authStore: CodexAuthStore = CodexAuthStore(),
@@ -164,6 +168,7 @@ final class CodexProvider: ProviderRuntime {
         }
 
         MetricLine.appendNoDataIfNeeded(&mapped.lines)
+        lastSuccessfulIdentityKey = Self.accountIdentityKey(from: authState.auth)
         return ProviderSnapshot.make(
             provider: provider,
             plan: mapped.plan,
@@ -171,6 +176,22 @@ final class CodexProvider: ProviderRuntime {
             refreshedAt: now(),
             usageHistory: usageHistory
         )
+    }
+
+    private static func accountIdentityKey(from auth: CodexAuth) -> String? {
+        if let accountID = auth.tokens?.accountID?
+            .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        {
+            return accountID.lowercased()
+        }
+        guard let idToken = auth.tokens?.idToken,
+              let accountID = DefaultAccountObserver.chatGPTAccountID(
+                  inIDTokenPayload: ProviderParse.jwtPayload(idToken)
+              )
+        else {
+            return nil
+        }
+        return accountID.lowercased()
     }
 
     /// Fetches the on-demand reset-credit balance (and per-credit expiry) without ever failing the

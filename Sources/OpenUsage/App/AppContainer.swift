@@ -7,6 +7,12 @@ import Observation
 @MainActor
 @Observable
 final class AppContainer {
+    /// The AppDelegate replaces its immutable registry, layout, runtime, and status-item graph when
+    /// a login changes; posting only after a verified graph diff keeps account cards stable otherwise.
+    static let accountGraphDidChangeNotification = Notification.Name(
+        "OpenUsage.accountGraphDidChange"
+    )
+
     let registry: WidgetRegistry
     let layout: LayoutStore
     let dataStore: WidgetDataStore
@@ -41,6 +47,10 @@ final class AppContainer {
     /// provider were ever removed from the registry. Injected into the view tree via
     /// `\.codexResetClaim`.
     let codexResetClaim: CodexResetClaimService?
+    /// The authoritative account registry shared by discovery, runtime assembly, and live renames.
+    let accounts: ProviderAccountsStore
+
+    var providerAccountsStore: ProviderAccountsStore { accounts }
     /// The provider runtimes, kept so on-demand credential detection (the Customize "Reset All" reseed)
     /// can re-probe `hasLocalCredentials()` the same way first-run seeding does.
     private let providers: [ProviderRuntime]
@@ -56,6 +66,8 @@ final class AppContainer {
     /// Persists a fresh `ShellEnvironmentSnapshot` once the login-shell capture completes, so the next
     /// launch can read shell-exported facts (provider home overrides) even when its own capture is slow.
     private let shellEnvironmentSnapshotTask: Task<Void, Never>
+    /// Cheap default-home identity checks catch live swaps promptly; full discovery is throttled.
+    private let accountGraphWatchTask: Task<Void, Never>
 
     /// `isFreshInstall` must be captured by the caller BEFORE `SettingsMigrator.migrate()` runs (the
     /// migrator's schema stamp makes the defaults domain non-empty). See `AppDelegate`.
@@ -67,11 +79,22 @@ final class AppContainer {
         // Once the capture lands, persist its identity-relevant facts so the NEXT launch has them
         // even if that launch's own capture is slow (see `ShellEnvironmentSnapshot`).
         self.shellEnvironmentSnapshotTask = ShellEnvironmentSnapshotStore(defaults: .standard).startRefreshTask()
-        // The launch account pass: which account is signed in at each family's default home. Feeds
-        // the snapshot cache's account stamp and reconciles the account registry.
-        let accountAssembly = ProviderAccountAssembly.make(waitsForLoginShell: true)
+        // Reconcile one shared registry before constructing any account-aware runtime. Every Claude
+        // runtime then follows its record's current verified source, regardless of its card id.
+        let accounts = ProviderAccountsStore()
+        let accountAssembly = ProviderAccountAssembly.make(
+            accountsStore: accounts,
+            waitsForLoginShell: true
+        )
+        self.accounts = accounts
 
-        let providers = ProviderCatalog.make()
+        let providers = ProviderCatalog.make(
+            claudeCards: accountAssembly.claudeCards,
+            allowsUnboundClaudeFallback: accountAssembly.allowsUnboundClaudeFallback,
+            defaultClaudeExtraLogRoots: accountAssembly.defaultClaudeExtraLogRoots,
+            defaultClaudeCoworkRoots: accountAssembly.defaultClaudeCoworkRoots,
+            defaultClaudeOrganization: accountAssembly.defaultClaudeOrganization
+        )
         let registry = WidgetRegistry.from(providers)
         let apiKeyProviders = providers.compactMap { $0 as? any APIKeyManaging }
         let enablement = ProviderEnablementStore()
@@ -86,7 +109,8 @@ final class AppContainer {
             isProviderEnabled: { [enablement] in enablement.isEnabled($0) },
             orderedDescriptors: { [layout] in layout.visiblePlaced.compactMap { layout.descriptor(for: $0) } },
             notificationSettings: { notificationSettings },
-            providerIdentityKeys: accountAssembly.identityKeysByCard
+            providerIdentityKeys: accountAssembly.identityKeysByCard,
+            resolveDisplayName: { [accounts] in accounts.resolvedDisplayName(cardID: $0) }
         )
         let iCloudSync = ICloudUsageSyncStore(dataStore: dataStore)
         // Re-enabling a provider should fetch it promptly, so clear any leftover failure backoff before
@@ -196,7 +220,7 @@ final class AppContainer {
         self.telemetry = telemetry
         self.transparency = PopoverTransparencyStore()
         self.privacy = MenuBarPrivacyStore()
-        self.localAPI = LocalUsageServer(state: { [layout, enablement, dataStore] in
+        self.localAPI = LocalUsageServer(state: { [layout, enablement, dataStore, accounts] in
             LocalUsageAPI.State(
                 enabledOrderedIDs: layout.orderedProviderIDs().filter { enablement.isEnabled($0) },
                 knownIDs: Set(registry.providers.map(\.id)),
@@ -204,8 +228,13 @@ final class AppContainer {
                 limitDescriptors: registry.limitDescriptorsByProvider,
                 errors: dataStore.providerErrors
             )
+            .resolvingDisplayNames(accounts.resolvedDisplayNamesByCardID)
         })
         self.refreshTask = Self.startPeriodicRefresh(dataStore: dataStore, telemetry: telemetry)
+        self.accountGraphWatchTask = Self.startAccountGraphWatch(
+            accounts: accounts,
+            initialAssembly: accountAssembly
+        )
         localAPI.start()
         // Become the notification-center delegate so banners show while frontmost — a menu-bar accessory
         // effectively always is. Notification authorization is requested the first time a trigger is
@@ -218,6 +247,32 @@ final class AppContainer {
         seedTask?.cancel()
         newProviderTask?.cancel()
         shellEnvironmentSnapshotTask.cancel()
+        accountGraphWatchTask.cancel()
+    }
+
+    /// Stop every long-lived service before the AppDelegate installs the replacement graph.
+    func shutdownForAccountGraphReload() {
+        accountGraphWatchTask.cancel()
+        refreshTask.cancel()
+        seedTask?.cancel()
+        newProviderTask?.cancel()
+        shellEnvironmentSnapshotTask.cancel()
+        iCloudSync.shutdownForAccountGraphReload()
+        localAPI.stop()
+    }
+
+    func displayName(for provider: Provider) -> String {
+        accounts.resolvedDisplayName(cardID: provider.id) ?? provider.displayName
+    }
+
+    func displayName(for providerID: String) -> String {
+        accounts.resolvedDisplayName(cardID: providerID)
+            ?? registry.provider(id: providerID)?.displayName
+            ?? providerID
+    }
+
+    func canRename(_ providerID: String) -> Bool {
+        accounts.record(for: providerID) != nil
     }
 
     /// Re-runs first-launch credential detection on demand — the enablement half of the Customize
@@ -261,6 +316,51 @@ final class AppContainer {
         AppearanceSetting.applyCurrent()
         AppLog.reloadLevel()
         AppLog.info(.config, "All settings reset to defaults")
+    }
+
+    /// Watch one tiny default-home identity file every five seconds, and only walk config dirs and
+    /// Cowork sandboxes after a detected swap or once a minute. Large Desktop histories therefore
+    /// do not turn the cheap watcher into a repeated hundreds-of-files scan.
+    private static func startAccountGraphWatch(
+        accounts: ProviderAccountsStore,
+        initialAssembly: ProviderAccountAssembly
+    ) -> Task<Void, Never> {
+        let initialDefaultIdentity = DefaultAccountObserver().observeClaude()
+        return Task { @MainActor in
+            var previousDefaultIdentity = initialDefaultIdentity
+            var checksSinceFullDiscovery = 0
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(5))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                let currentDefaultIdentity = DefaultAccountObserver().observeClaude()
+                checksSinceFullDiscovery += 1
+                let defaultChanged = currentDefaultIdentity != previousDefaultIdentity
+                guard defaultChanged || checksSinceFullDiscovery >= 12 else { continue }
+
+                previousDefaultIdentity = currentDefaultIdentity
+                checksSinceFullDiscovery = 0
+                let currentAssembly = ProviderAccountAssembly.make(
+                    accountsStore: accounts,
+                    waitsForLoginShell: true
+                )
+                guard !Task.isCancelled else { return }
+                guard currentAssembly.claudeCards != initialAssembly.claudeCards
+                    || currentAssembly.identityKeysByCard != initialAssembly.identityKeysByCard
+                    || currentAssembly.allowsUnboundClaudeFallback != initialAssembly.allowsUnboundClaudeFallback
+                else { continue }
+
+                AppLog.info(.config, "accounts: verified account sources changed; rebuilding the runtime graph")
+                NotificationCenter.default.post(
+                    name: Self.accountGraphDidChangeNotification,
+                    object: nil
+                )
+                return
+            }
+        }
     }
 
     /// Drives live updates: refresh on launch, then again every refresh interval. Each pass honors the

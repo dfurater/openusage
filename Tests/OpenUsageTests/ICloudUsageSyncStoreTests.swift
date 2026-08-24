@@ -50,6 +50,71 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
         XCTAssertEqual(writeCount, 2)
     }
 
+    func testAccountGraphShutdownCancelsDebouncedWriteWithoutDisablingOrDeleting() async throws {
+        let defaults = makeDefaults("account-graph-shutdown-debounce")
+        let fileStore = RecordingHistoryFileStore()
+        let sync = ICloudUsageSyncStore(
+            dataStore: makeDataStore(defaults),
+            defaults: defaults,
+            fileStore: fileStore,
+            deviceIDStore: MemoryDeviceIDStore(),
+            writeDebounce: .milliseconds(30),
+            observesMetadataChanges: false
+        )
+        sync.enabled = true
+        try await waitUntil { await fileStore.writeCount == 1 && !sync.isSyncing }
+
+        sync.scheduleWrite()
+        sync.shutdownForAccountGraphReload()
+        sync.scheduleWrite()
+        try await Task.sleep(for: .milliseconds(80))
+
+        let writeCount = await fileStore.writeCount
+        let documents = await fileStore.documents
+        let deletedDeviceIDs = await fileStore.deletedDeviceIDs
+        XCTAssertEqual(writeCount, 1, "the retired graph cannot publish a queued or newly scheduled write")
+        XCTAssertEqual(documents.map(\.deviceID), [sync.deviceID], "graph reload keeps this Mac's existing file")
+        XCTAssertTrue(deletedDeviceIDs.isEmpty, "graph reload is not the same as opting out of iCloud")
+        XCTAssertTrue(sync.enabled)
+        XCTAssertTrue(defaults.bool(forKey: "openusage.icloudSync.enabled.v1"))
+    }
+
+    func testAccountGraphShutdownCancelsInFlightWriteWithoutReplacingExistingFile() async throws {
+        let defaults = makeDefaults("account-graph-shutdown-in-flight")
+        let deviceIDStore = MemoryDeviceIDStore()
+        let expectedDeviceID = UUID().uuidString.lowercased()
+        try deviceIDStore.writeDeviceID(expectedDeviceID)
+        let existingDocument = UsageHistoryDocument(
+            deviceID: expectedDeviceID,
+            deviceName: "Previous Account Graph",
+            updatedAt: Date(timeIntervalSince1970: 123),
+            providers: [:]
+        )
+        let fileStore = RecordingHistoryFileStore(seedDocuments: [existingDocument])
+        let sync = ICloudUsageSyncStore(
+            dataStore: makeDataStore(defaults),
+            defaults: defaults,
+            fileStore: fileStore,
+            deviceIDStore: deviceIDStore,
+            observesMetadataChanges: false
+        )
+
+        await fileStore.holdNextWrite()
+        sync.enabled = true
+        try await waitUntil { await fileStore.writeInFlight }
+
+        sync.shutdownForAccountGraphReload()
+        await fileStore.releaseWrite()
+        try await waitUntil { !(await fileStore.writeInFlight) && !sync.isSyncing }
+
+        let documents = await fileStore.documents
+        let deletedDeviceIDs = await fileStore.deletedDeviceIDs
+        XCTAssertEqual(documents, [existingDocument], "a canceled stale graph must not replace the current device file")
+        XCTAssertTrue(deletedDeviceIDs.isEmpty, "only the replacement graph owns subsequent writes")
+        XCTAssertTrue(sync.enabled)
+        XCTAssertNil(sync.serviceError, "cancellation is an intentional shutdown, not an iCloud failure")
+    }
+
     func testDisableDeletesWriteThatWasAlreadyInFlight() async throws {
         let defaults = makeDefaults("disable-in-flight-write")
         let fileStore = RecordingHistoryFileStore()
@@ -283,6 +348,7 @@ private actor RecordingHistoryFileStore: UsageHistoryFileStoring {
 
     func write(_ document: UsageHistoryDocument) async throws {
         if unavailable { throw ICloudUsageSyncError.unavailable }
+        try Task.checkCancellation()
         writeCount += 1
         writeInFlight = true
         defer { writeInFlight = false }
@@ -292,6 +358,7 @@ private actor RecordingHistoryFileStore: UsageHistoryFileStoring {
                 writeGate = continuation
             }
         }
+        try Task.checkCancellation()
         documents.removeAll { $0.deviceID == document.deviceID }
         documents.append(document)
     }
