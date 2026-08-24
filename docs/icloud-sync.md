@@ -7,10 +7,11 @@ existing file after app preferences are reset or the app is reinstalled. There i
 pairing code, or separate account.
 
 The file contains normalized daily tokens and spend, model totals, and unknown-model names for sources
-that are local to one Mac: Claude, Codex, Grok, and OpenCode. It does not contain credentials, account
-limits, raw logs, or provider responses. Cursor's history is already account-wide, so it stays local and
-is never added across Macs. Disabling a provider immediately removes its peer contributions from the
-combined view and omits it from this Mac's next iCloud write, while its local cached snapshot remains.
+that are local to one Mac: Antigravity, Claude, Codex, Grok, and OpenCode. It does not contain
+credentials, account limits, raw logs, or provider responses. Cursor's history is already account-wide,
+so it stays local and is never added across Macs. Disabling a provider immediately removes its peer
+contributions from the combined view and omits it from this Mac's next iCloud write, while its local
+cached snapshot remains.
 
 OpenUsage combines the valid files in memory and rebuilds Today, Yesterday, Last 30 Days, Usage Trend,
 unknown-model warnings, and model breakdowns. The same combined spend rows feed the dashboard, Total
@@ -38,8 +39,9 @@ identity information, that history is temporarily left out instead of being assi
 card. Once the account can be identified, its history joins the matching card again. A Codex login kept
 in the system keychain proves its identity during its normal successful refresh, so its history starts
 syncing afterward without an extra Keychain read or a new permission prompt. If that same verified
-credential temporarily stops reporting its account identifier, syncing continues; a different credential
-without an identifiable owner stays excluded until its account can be verified.
+login refreshes its access token or temporarily stops reporting its account identifier, syncing
+continues; a different login without an identifiable owner stays excluded until its account can be
+verified.
 
 An account you use on another Mac but have no login for here doesn't become a card. If this Mac already
 has another enabled, verified account from the same provider, the remote account appears as its own
