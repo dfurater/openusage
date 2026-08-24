@@ -20,6 +20,15 @@ set -euo pipefail
 MODE="${1:-run}"
 CONFIG="${CONFIG:-release}"
 
+# Toolchain hygiene: the standalone CommandLineTools toolchain ships without the SwiftUI macro
+# plugins (libSwiftUIMacros.dylib et al.), so building against its SDK fails with cryptic
+# "plugin for module 'SwiftUIMacros' not found" errors, and a stray SDKROOT pointing at the
+# CLT SDK triggers exactly that. Prefer a full Xcode install when one exists.
+if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+  export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
+  unset SDKROOT
+fi
+
 TARGET_NAME="OpenUsage"                 # SwiftPM target / binary name
 APP_DISPLAY="OpenUsage"                 # user-facing app name
 BUNDLE_ID="${BUNDLE_ID:-com.robinebers.openusage.dev}"
