@@ -65,14 +65,14 @@ final class ShareCardRendererTests: XCTestCase {
         ]
         let team = ShareCardView(
             provider: provider,
-            plan: "Team",
+            plan: "Team 5x",
             rows: teamRows,
             appearance: .dark,
             displayNameOverride: "Claude — SUNSTORY"
         )
         let personal = ShareCardView(
             provider: personalProvider,
-            plan: "Max",
+            plan: "Max 20x",
             rows: personalRows,
             appearance: .dark,
             displayNameOverride: "Claude — Personal"
