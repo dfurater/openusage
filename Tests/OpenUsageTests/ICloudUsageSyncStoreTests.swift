@@ -6,14 +6,7 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
     func testEnableWritesLoadsAndDisableDeletesThisMac() async throws {
         let defaults = makeDefaults("enable-disable")
         let fileStore = RecordingHistoryFileStore()
-        let sync = ICloudUsageSyncStore(
-            dataStore: makeDataStore(defaults),
-            defaults: defaults,
-            fileStore: fileStore,
-            deviceIDStore: MemoryDeviceIDStore(),
-            writeDebounce: .milliseconds(10),
-            observesMetadataChanges: false
-        )
+        let sync = makeSync(defaults: defaults, fileStore: fileStore, writeDebounce: .milliseconds(10))
 
         sync.enabled = true
         try await waitUntil { await fileStore.writeCount == 1 && sync.displayedDocuments.count == 1 }
@@ -29,14 +22,7 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
     func testAdjacentHistoryChangesDebounceToOneWrite() async throws {
         let defaults = makeDefaults("debounce")
         let fileStore = RecordingHistoryFileStore()
-        let sync = ICloudUsageSyncStore(
-            dataStore: makeDataStore(defaults),
-            defaults: defaults,
-            fileStore: fileStore,
-            deviceIDStore: MemoryDeviceIDStore(),
-            writeDebounce: .milliseconds(20),
-            observesMetadataChanges: false
-        )
+        let sync = makeSync(defaults: defaults, fileStore: fileStore, writeDebounce: .milliseconds(20))
         sync.enabled = true
         try await waitUntil { await fileStore.writeCount == 1 }
 
@@ -118,13 +104,7 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
     func testDisableDeletesWriteThatWasAlreadyInFlight() async throws {
         let defaults = makeDefaults("disable-in-flight-write")
         let fileStore = RecordingHistoryFileStore()
-        let sync = ICloudUsageSyncStore(
-            dataStore: makeDataStore(defaults),
-            defaults: defaults,
-            fileStore: fileStore,
-            deviceIDStore: MemoryDeviceIDStore(),
-            observesMetadataChanges: false
-        )
+        let sync = makeSync(defaults: defaults, fileStore: fileStore)
 
         // Hold the enable write open so disable can race it deliberately, instead of hoping an
         // 80ms sleep is still in flight when the test flips the toggle on a loaded CI runner.
@@ -151,13 +131,7 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
     func testUnavailableStoreSurfacesFriendlyError() async throws {
         let defaults = makeDefaults("unavailable")
         let fileStore = RecordingHistoryFileStore(unavailable: true)
-        let sync = ICloudUsageSyncStore(
-            dataStore: makeDataStore(defaults),
-            defaults: defaults,
-            fileStore: fileStore,
-            deviceIDStore: MemoryDeviceIDStore(),
-            observesMetadataChanges: false
-        )
+        let sync = makeSync(defaults: defaults, fileStore: fileStore)
 
         sync.enabled = true
         try await waitUntil { sync.serviceError != nil && !sync.isSyncing }
@@ -178,13 +152,7 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
             seedDocuments: [peer],
             invalidFileMessages: ["broken.json: invalid value"]
         )
-        let sync = ICloudUsageSyncStore(
-            dataStore: makeDataStore(defaults),
-            defaults: defaults,
-            fileStore: fileStore,
-            deviceIDStore: MemoryDeviceIDStore(),
-            observesMetadataChanges: false
-        )
+        let sync = makeSync(defaults: defaults, fileStore: fileStore)
 
         sync.enabled = true
         try await waitUntil { sync.invalidFileMessages.count == 1 }
@@ -196,14 +164,7 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
     func testBackgroundReloadShowsSyncActivity() async throws {
         let defaults = makeDefaults("background-sync-activity")
         let fileStore = RecordingHistoryFileStore()
-        let sync = ICloudUsageSyncStore(
-            dataStore: makeDataStore(defaults),
-            defaults: defaults,
-            fileStore: fileStore,
-            deviceIDStore: MemoryDeviceIDStore(),
-            writeDebounce: .milliseconds(10),
-            observesMetadataChanges: false
-        )
+        let sync = makeSync(defaults: defaults, fileStore: fileStore, writeDebounce: .milliseconds(10))
 
         sync.enabled = true
         try await waitUntil {
@@ -229,21 +190,9 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
         firstDefaults.set(expectedID, forKey: "openusage.icloudSync.deviceID.v1")
         let deviceIDStore = MemoryDeviceIDStore()
 
-        let first = ICloudUsageSyncStore(
-            dataStore: makeDataStore(firstDefaults),
-            defaults: firstDefaults,
-            fileStore: RecordingHistoryFileStore(),
-            deviceIDStore: deviceIDStore,
-            observesMetadataChanges: false
-        )
+        let first = makeSync(defaults: firstDefaults, fileStore: RecordingHistoryFileStore(), deviceIDStore: deviceIDStore)
         let resetDefaults = makeDefaults("identity-after-reset")
-        let afterReset = ICloudUsageSyncStore(
-            dataStore: makeDataStore(resetDefaults),
-            defaults: resetDefaults,
-            fileStore: RecordingHistoryFileStore(),
-            deviceIDStore: deviceIDStore,
-            observesMetadataChanges: false
-        )
+        let afterReset = makeSync(defaults: resetDefaults, fileStore: RecordingHistoryFileStore(), deviceIDStore: deviceIDStore)
 
         XCTAssertEqual(first.deviceID, expectedID)
         XCTAssertEqual(afterReset.deviceID, expectedID)
@@ -268,12 +217,25 @@ final class ICloudUsageSyncStoreTests: XCTestCase {
         XCTAssertEqual(try production.readDeviceID(), "production-id")
     }
 
-    private func makeDataStore(_ defaults: UserDefaults) -> WidgetDataStore {
-        WidgetDataStore(
+    private func makeSync(
+        defaults: UserDefaults,
+        fileStore: RecordingHistoryFileStore,
+        deviceIDStore: MemoryDeviceIDStore = MemoryDeviceIDStore(),
+        writeDebounce: Duration = .seconds(3)
+    ) -> ICloudUsageSyncStore {
+        let dataStore = WidgetDataStore(
             registry: WidgetRegistry(providers: [], descriptors: []),
             providers: [],
             cache: ProviderSnapshotCache(userDefaults: defaults, storageKey: "snapshots"),
             defaults: defaults
+        )
+        return ICloudUsageSyncStore(
+            dataStore: dataStore,
+            defaults: defaults,
+            fileStore: fileStore,
+            deviceIDStore: deviceIDStore,
+            writeDebounce: writeDebounce,
+            observesMetadataChanges: false
         )
     }
 
