@@ -63,6 +63,11 @@ struct ClaudeCoworkDiscovery {
         let started = now()
         var result = Result()
         for root in listSandboxes(homeDirectory()) {
+            if Task.isCancelled {
+                result.notes.append("cowork sandbox scan cancelled → skipping incomplete cowork routing")
+                result.truncated = true
+                break
+            }
             if now().timeIntervalSince(started) > timeBudget {
                 result.notes.append("cowork sandbox scan hit its \(Int(timeBudget * 1000))ms budget → skipping cowork routing this launch")
                 result.truncated = true

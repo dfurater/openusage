@@ -23,6 +23,13 @@ struct ClaudeAccountCard: Equatable, Sendable {
     var coworkRootsOverride: [URL]?
 }
 
+/// Results collected away from the main actor before rebuilding the account graph.
+/// The account registry itself remains main-actor-owned; only filesystem discovery is detached.
+struct PreparedProviderAccountDiscovery: Sendable {
+    var config: ClaudeConfigDirDiscovery.Result
+    var cowork: ClaudeCoworkDiscovery.Result
+}
+
 /// Discovers verified account sources, reconciles their permanent records, and constructs exactly
 /// one runtime binding per account observed this launch.
 @MainActor
@@ -47,7 +54,8 @@ struct ProviderAccountAssembly {
     static func make(
         defaults: UserDefaults = .standard,
         accountsStore: ProviderAccountsStore? = nil,
-        waitsForLoginShell: Bool
+        waitsForLoginShell: Bool,
+        preparedDiscovery: PreparedProviderAccountDiscovery? = nil
     ) -> ProviderAccountAssembly {
         let store = accountsStore ?? ProviderAccountsStore(defaults: defaults)
         let shellFactsReadable = !waitsForLoginShell
@@ -73,7 +81,8 @@ struct ProviderAccountAssembly {
             accountsStore: store,
             families: families,
             claudeDiscovery: ClaudeConfigDirDiscovery(),
-            coworkDiscovery: ClaudeCoworkDiscovery()
+            coworkDiscovery: ClaudeCoworkDiscovery(),
+            preparedDiscovery: preparedDiscovery
         )
     }
 
@@ -88,6 +97,7 @@ struct ProviderAccountAssembly {
         families: Set<String> = ProviderAccountID.families,
         claudeDiscovery: ClaudeConfigDirDiscovery? = nil,
         coworkDiscovery: ClaudeCoworkDiscovery? = nil,
+        preparedDiscovery: PreparedProviderAccountDiscovery? = nil,
         hasDesktopCredentialMaterial: @Sendable () -> Bool = {
             ClaudeDesktopAuthStore().hasCredentialMaterial()
         }
@@ -107,14 +117,20 @@ struct ProviderAccountAssembly {
             AppLog.info(.config, "discovery: claude default identity is unreadable; checking independently verified config-dir and Desktop accounts")
         }
 
-        let configScan = claudeCandidatesAllowed ? claudeDiscovery?.run() : nil
-        let coworkScan = claudeCandidatesAllowed ? coworkDiscovery?.run() : nil
+        let configScan = claudeCandidatesAllowed
+            ? preparedDiscovery?.config ?? claudeDiscovery?.run()
+            : nil
+        let coworkScan = claudeCandidatesAllowed
+            ? preparedDiscovery?.cowork ?? coworkDiscovery?.run()
+            : nil
         for note in (configScan?.notes ?? []) + (coworkScan?.notes ?? []) {
             AppLog.info(.config, "discovery: \(note)")
         }
 
         var knownClaudeIdentities = Set(
-            accountsStore.records.filter { $0.family == "claude" }.map(\.identityKey)
+            accountsStore.records
+                .filter { $0.family == "claude" }
+                .flatMap { [$0.identityKey] + ($0.identityAliases ?? []) }
         )
         if case .resolved(let key, _, _)? = claudeOutcome {
             knownClaudeIdentities.insert(key)
@@ -242,6 +258,14 @@ struct ProviderAccountAssembly {
         var needsCoworkPartition = false
         var desktopCredentialMaterial: Bool?
         if let coworkScan, !coworkScan.truncated {
+            let desktopUsersByOrganization = coworkScan.sandboxes.reduce(
+                into: [String: Set<String>]()
+            ) { users, sandbox in
+                guard let organization = sandbox.organization?.nilIfEmpty,
+                      let identityKey = sandbox.identityKey
+                else { return }
+                users[organization, default: []].insert(claudeUserID(identityKey))
+            }
             for sandbox in coworkScan.sandboxes {
                 guard let sandboxKey = sandbox.identityKey else {
                     unidentifiedCoworkRoots.append(sandbox.root)
@@ -262,6 +286,9 @@ struct ProviderAccountAssembly {
                 }
 
                 needsCoworkPartition = true
+                let hasAmbiguousDesktopOwner = sandbox.organization.map {
+                    (desktopUsersByOrganization[$0]?.count ?? 0) > 1
+                } ?? false
                 let desktopSource = ProviderAccountSource(
                     kind: .desktop,
                     anchor: nil,
@@ -269,8 +296,10 @@ struct ProviderAccountAssembly {
                 )
                 if var account = plannedAccounts[identityKey] {
                     appendUnique(sandbox.root, to: &account.logRoots)
-                    if sandbox.organization != nil {
+                    if sandbox.organization != nil && !hasAmbiguousDesktopOwner {
                         appendUnique(desktopSource, to: &account.sources)
+                    } else if hasAmbiguousDesktopOwner {
+                        AppLog.warn(.config, "discovery: cowork organization names multiple account owners; Desktop credential source quarantined")
                     }
                     if account.label == nil { account.label = sandbox.label }
                     plannedAccounts[identityKey] = account
@@ -279,6 +308,10 @@ struct ProviderAccountAssembly {
 
                 guard let organization = sandbox.organization?.nilIfEmpty else {
                     AppLog.warn(.config, "discovery: cowork account \(ProviderAccountID.make(family: "claude", identityKey: identityKey)) has no organization pin; sandbox quarantined")
+                    continue
+                }
+                guard !hasAmbiguousDesktopOwner else {
+                    AppLog.warn(.config, "discovery: cowork organization names multiple account owners; Desktop-only account quarantined")
                     continue
                 }
                 if desktopCredentialMaterial == nil {
@@ -306,10 +339,10 @@ struct ProviderAccountAssembly {
         if !unidentifiedCoworkRoots.isEmpty, needsCoworkPartition {
             AppLog.warn(.config, "discovery: \(unidentifiedCoworkRoots.count) unidentified cowork sandbox(es) quarantined because account ownership cannot be proven")
         }
-        if coworkScan?.truncated == true, multipleClaudeAccounts {
+        if coworkScan?.truncated == true {
             needsCoworkPartition = true
             defaultCoworkRoots = []
-            AppLog.warn(.config, "discovery: cowork scan truncated with multiple claude accounts; cowork spend withheld until a complete scan succeeds")
+            AppLog.warn(.config, "discovery: cowork scan truncated; cowork spend withheld until a complete scan proves account ownership")
         }
 
         // The default observation must be reconciled first, preserving the existing bare-id

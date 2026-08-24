@@ -306,6 +306,71 @@ final class ProviderAccountAssemblyTests: XCTestCase {
         XCTAssertEqual(Set(store.records[0].sources.map(\.kind)), [.defaultHome, .configDir])
     }
 
+    func testOrganizationIdentityChangesPreserveTheOriginalCardAcrossGraphRebuilds() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let withoutOrganization = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A"}}"#
+        )
+        let first = ProviderAccountAssembly.make(observer: withoutOrganization, accountsStore: store)
+        XCTAssertEqual(first.claudeCards.map(\.id), ["claude"])
+        store.rename(cardID: "claude", to: "My Account")
+
+        let withOrganization = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"ORG-A"}}"#
+        )
+        let upgraded = ProviderAccountAssembly.make(observer: withOrganization, accountsStore: store)
+        XCTAssertEqual(upgraded.claudeCards.map(\.id), ["claude"])
+        XCTAssertEqual(upgraded.claudeCards.first?.identityKey, "account-a|org-a")
+        XCTAssertEqual(store.resolvedDisplayName(cardID: "claude"), "My Account")
+
+        let reverted = ProviderAccountAssembly.make(observer: withoutOrganization, accountsStore: store)
+        XCTAssertEqual(reverted.claudeCards.map(\.id), ["claude"])
+        XCTAssertEqual(reverted.claudeCards.first?.identityKey, "account-a")
+        XCTAssertEqual(store.record(for: "claude")?.identityAliases, ["account-a|org-a"])
+        XCTAssertEqual(store.resolvedDisplayName(cardID: "claude"), "My Account")
+    }
+
+    func testPreparedDiscoveryResultsReplaceTheSynchronousFilesystemScanners() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"ORG-A"}}"#
+        )
+        let ignoredPath = "/Users/dev/.claude-ignored"
+        let synchronousDiscovery = makeDiscovery(
+            files: [
+                ignoredPath + "/.claude.json":
+                    #"{"oauthAccount":{"accountUuid":"WRONG","organizationUuid":"ORG-WRONG"}}"#,
+                ignoredPath + "/.credentials.json":
+                    #"{"claudeAiOauth":{"accessToken":"ignored-token"}}"#,
+            ],
+            subdirectories: [ignoredPath]
+        )
+        let preparedPath = "/Users/dev/.claude-prepared"
+        let prepared = PreparedProviderAccountDiscovery(
+            config: ClaudeConfigDirDiscovery.Result(findings: [
+                ClaudeConfigDirDiscovery.Finding(
+                    identityKey: "account-b|org-b",
+                    label: "Prepared",
+                    anchorPath: preparedPath,
+                    keychainLiteral: preparedPath
+                )
+            ]),
+            cowork: ClaudeCoworkDiscovery.Result()
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            claudeDiscovery: synchronousDiscovery,
+            preparedDiscovery: prepared
+        )
+
+        XCTAssertEqual(Set(assembly.claudeCards.map(\.identityKey)), [
+            "account-a|org-a", "account-b|org-b",
+        ])
+        XCTAssertFalse(assembly.claudeCards.contains { $0.identityKey == "wrong|org-wrong" })
+    }
+
     func testSameUserOrganizationsStaySeparateAndUnidentifiedSandboxIsQuarantined() throws {
         let store = ProviderAccountsStore(defaults: makeScratchDefaults())
         let observer = makeClaudeObserver(
@@ -467,6 +532,61 @@ final class ProviderAccountAssemblyTests: XCTestCase {
         let defaultCard = try XCTUnwrap(assembly.claudeCards.first { $0.id == "claude" })
         XCTAssertEqual(defaultCard.coworkRootsOverride, [])
         XCTAssertEqual(assembly.defaultClaudeCoworkRoots, [])
+    }
+
+    func testTruncatedCoworkWalkWithOneKnownAccountStillWithholdsUnverifiedSandboxes() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"ORG-A"}}"#
+        )
+        let truncatedCowork = makeCoworkDiscovery(
+            files: [:],
+            sandboxes: ["/Users/dev/cowork/unknown/.claude"],
+            timeBudget: -1
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            coworkDiscovery: truncatedCowork,
+            hasDesktopCredentialMaterial: { true }
+        )
+
+        let defaultCard = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertEqual(defaultCard.coworkRootsOverride, [])
+        XCTAssertEqual(assembly.defaultClaudeCoworkRoots, [])
+    }
+
+    func testDifferentDesktopUsersSharingOneOrganizationCannotBorrowEachOthersToken() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"ORG-SHARED"}}"#
+        )
+        let verifiedRoot = "/Users/dev/cowork/current/.claude"
+        let historicalRoot = "/Users/dev/cowork/historical/.claude"
+        let cowork = makeCoworkDiscovery(
+            files: [
+                verifiedRoot + "/.claude.json":
+                    #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"ORG-SHARED"}}"#,
+                historicalRoot + "/.claude.json":
+                    #"{"oauthAccount":{"accountUuid":"ACCOUNT-B","organizationUuid":"ORG-SHARED"}}"#,
+            ],
+            sandboxes: [verifiedRoot, historicalRoot]
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            coworkDiscovery: cowork,
+            hasDesktopCredentialMaterial: { true }
+        )
+
+        let verifiedAccount = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertEqual(verifiedAccount.identityKey, "account-a|org-shared")
+        XCTAssertEqual(verifiedAccount.coworkRootsOverride?.map(\.path), [verifiedRoot])
+        XCTAssertFalse(store.records.contains { $0.identityKey == "account-b|org-shared" })
     }
 
     func testDistinctCoworkAccountWithoutOrganizationNeverBorrowsDefaultSpend() throws {

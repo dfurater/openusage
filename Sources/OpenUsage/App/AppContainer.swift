@@ -319,8 +319,8 @@ final class AppContainer {
     }
 
     /// Watch one tiny default-home identity file every five seconds, and only walk config dirs and
-    /// Cowork sandboxes after a detected swap or once a minute. Large Desktop histories therefore
-    /// do not turn the cheap watcher into a repeated hundreds-of-files scan.
+    /// Cowork sandboxes after a detected swap or once a minute. The potentially hundreds of identity
+    /// files are collected off the main actor; account-store reconciliation alone returns to it.
     private static func startAccountGraphWatch(
         accounts: ProviderAccountsStore,
         initialAssembly: ProviderAccountAssembly
@@ -343,9 +343,16 @@ final class AppContainer {
 
                 previousDefaultIdentity = currentDefaultIdentity
                 checksSinceFullDiscovery = 0
+                let preparedDiscovery = await prepareAccountDiscovery()
+                guard !Task.isCancelled else { return }
+                guard DefaultAccountObserver().observeClaude() == currentDefaultIdentity else {
+                    AppLog.info(.config, "accounts: default login changed during discovery; retrying with a fresh graph scan")
+                    continue
+                }
                 let currentAssembly = ProviderAccountAssembly.make(
                     accountsStore: accounts,
-                    waitsForLoginShell: true
+                    waitsForLoginShell: true,
+                    preparedDiscovery: preparedDiscovery
                 )
                 guard !Task.isCancelled else { return }
                 guard currentAssembly.claudeCards != initialAssembly.claudeCards
@@ -360,6 +367,39 @@ final class AppContainer {
                 )
                 return
             }
+        }
+    }
+
+    /// Collect blocking filesystem/keychain-attribute discovery on a detached utility executor.
+    /// Cancelling the graph watcher also cancels its detached scan; no stale result may reconcile.
+    static func prepareAccountDiscovery(
+        configScan: @escaping @Sendable () -> ClaudeConfigDirDiscovery.Result = {
+            ClaudeConfigDirDiscovery().run()
+        },
+        coworkScan: @escaping @Sendable () -> ClaudeCoworkDiscovery.Result = {
+            ClaudeCoworkDiscovery().run()
+        }
+    ) async -> PreparedProviderAccountDiscovery {
+        let task = Task.detached(priority: .utility) {
+            guard !Task.isCancelled else {
+                return PreparedProviderAccountDiscovery(
+                    config: ClaudeConfigDirDiscovery.Result(),
+                    cowork: ClaudeCoworkDiscovery.Result(truncated: true)
+                )
+            }
+            let config = configScan()
+            guard !Task.isCancelled else {
+                return PreparedProviderAccountDiscovery(
+                    config: config,
+                    cowork: ClaudeCoworkDiscovery.Result(truncated: true)
+                )
+            }
+            return PreparedProviderAccountDiscovery(config: config, cowork: coworkScan())
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
         }
     }
 

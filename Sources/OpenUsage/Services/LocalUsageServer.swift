@@ -1,10 +1,44 @@
 import Foundation
 import Network
 
+/// The listener boundary keeps asynchronous port-release races testable without binding a real port.
+@MainActor
+protocol LocalUsageListening: AnyObject {
+    func setStateHandler(_ handler: (@Sendable (NWListener.State) -> Void)?)
+    func setConnectionHandler(_ handler: (@Sendable (NWConnection) -> Void)?)
+    func start(queue: DispatchQueue)
+    func cancel()
+}
+
+@MainActor
+private final class NetworkLocalUsageListener: LocalUsageListening {
+    private let listener: NWListener
+
+    init(parameters: NWParameters) throws {
+        listener = try NWListener(using: parameters)
+    }
+
+    func setStateHandler(_ handler: (@Sendable (NWListener.State) -> Void)?) {
+        listener.stateUpdateHandler = handler
+    }
+
+    func setConnectionHandler(_ handler: (@Sendable (NWConnection) -> Void)?) {
+        listener.newConnectionHandler = handler
+    }
+
+    func start(queue: DispatchQueue) {
+        listener.start(queue: queue)
+    }
+
+    func cancel() {
+        listener.cancel()
+    }
+}
+
 /// Loopback-only HTTP/1.1 listener for the read-only usage API on `127.0.0.1:6736`. Starts with
-/// the app; when the port is already taken the feature is silently disabled for the session
-/// (matching the original app). At most 16 requests are served concurrently — beyond that a
-/// connection gets `503 {"error":"server_busy"}` immediately.
+/// the app; bounded retries bridge Network's asynchronous port release after an account graph
+/// reload. At most 16 requests are served concurrently — beyond that a connection gets
+/// `503 {"error":"server_busy"}` immediately.
 @MainActor
 final class LocalUsageServer {
     static let port: UInt16 = 6736
@@ -12,49 +46,131 @@ final class LocalUsageServer {
     private static let headLimit = 8192
 
     private let state: @MainActor () -> LocalUsageAPI.State
+    private let makeListener: @MainActor (NWParameters) throws -> any LocalUsageListening
+    private let retryDelay: Duration
+    private let maxStartupAttempts: Int
     private let queue = DispatchQueue(label: "openusage.local-api")
-    private var listener: NWListener?
+    private var listener: (any LocalUsageListening)?
+    private var listenerGeneration: UUID?
+    private var retryTask: Task<Void, Never>?
+    private var startupAttempts = 0
+    private var shouldRun = false
     private var activeConnections = 0
 
-    init(state: @escaping @MainActor () -> LocalUsageAPI.State) {
+    init(
+        state: @escaping @MainActor () -> LocalUsageAPI.State,
+        makeListener: (@MainActor (NWParameters) throws -> any LocalUsageListening)? = nil,
+        retryDelay: Duration = .milliseconds(150),
+        maxStartupAttempts: Int = 12
+    ) {
+        precondition(maxStartupAttempts > 0)
         self.state = state
+        self.makeListener = makeListener ?? { try NetworkLocalUsageListener(parameters: $0) }
+        self.retryDelay = retryDelay
+        self.maxStartupAttempts = maxStartupAttempts
     }
 
     func start() {
+        guard !shouldRun else { return }
+        shouldRun = true
+        startupAttempts = 0
+        startListener()
+    }
+
+    private func startListener() {
+        guard shouldRun else { return }
+        startupAttempts += 1
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(
             host: "127.0.0.1",
             port: NWEndpoint.Port(rawValue: Self.port)!
         )
 
-        let listener: NWListener
+        let listener: any LocalUsageListening
         do {
-            listener = try NWListener(using: parameters)
+            listener = try makeListener(parameters)
         } catch {
-            AppLog.info(.localAPI, "disabled: \(error.localizedDescription)")
+            handleStartupFailure(error)
             return
         }
 
-        listener.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
-                // Most commonly the port is already in use — silently disable for this session.
-                AppLog.info(.localAPI, "disabled: \(error.localizedDescription)")
-            }
-        }
-        listener.newConnectionHandler = { connection in
+        let generation = UUID()
+        listenerGeneration = generation
+        listener.setStateHandler { [weak self] state in
             Task { @MainActor [weak self] in
-                self?.accept(connection)
+                guard let self,
+                      self.shouldRun,
+                      self.listenerGeneration == generation
+                else { return }
+                if case .failed(let error) = state {
+                    self.retireListener()
+                    self.handleStartupFailure(error)
+                }
             }
         }
-        listener.start(queue: queue)
+        listener.setConnectionHandler { [weak self] connection in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.shouldRun,
+                      self.listenerGeneration == generation
+                else {
+                    connection.cancel()
+                    return
+                }
+                self.accept(connection)
+            }
+        }
         self.listener = listener
+        listener.start(queue: queue)
+    }
+
+    private func handleStartupFailure(_ error: Error) {
+        guard shouldRun else { return }
+        guard Self.isAddressInUse(error), startupAttempts < maxStartupAttempts else {
+            shouldRun = false
+            AppLog.error(.localAPI, "listener failed after \(startupAttempts) attempt(s): \(error.localizedDescription)")
+            return
+        }
+
+        AppLog.warn(
+            .localAPI,
+            "listener port is still in use; retrying startup (attempt \(startupAttempts + 1)/\(maxStartupAttempts))"
+        )
+        retryTask?.cancel()
+        retryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: retryDelay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, shouldRun else { return }
+            startListener()
+        }
+    }
+
+    private static func isAddressInUse(_ error: Error) -> Bool {
+        if case NWError.posix(let code) = error {
+            return code == .EADDRINUSE
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(EADDRINUSE)
     }
 
     /// Release the loopback port before replacing the account-owned runtime graph. Waiting for
     /// deallocation is insufficient because Network retains its listener handlers asynchronously.
+    /// Cancellation itself is asynchronous; the replacement listener retries until the port is free.
     func stop() {
-        listener?.stateUpdateHandler = nil
-        listener?.newConnectionHandler = nil
+        shouldRun = false
+        retryTask?.cancel()
+        retryTask = nil
+        retireListener()
+    }
+
+    private func retireListener() {
+        listenerGeneration = nil
+        listener?.setStateHandler(nil)
+        listener?.setConnectionHandler(nil)
         listener?.cancel()
         listener = nil
     }
@@ -72,7 +188,7 @@ final class LocalUsageServer {
     /// Reads until the end of the request head (`\r\n\r\n`). GET/OPTIONS bodies are irrelevant,
     /// so the head is all the router needs.
     private func receiveHead(_ connection: NWConnection, buffered: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: Self.headLimit) { data, _, isComplete, error in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: Self.headLimit) { [weak self] data, _, isComplete, error in
             Task { @MainActor [weak self] in
                 guard let self else {
                     connection.cancel()

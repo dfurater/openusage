@@ -87,6 +87,9 @@ struct ProviderAccountRecord: Codable, Equatable, Sendable {
     var id: String
     var family: String
     var identityKey: String
+    /// Older Claude state sometimes omits the organization. Keep its previous spelling when that
+    /// changes so a later second organization cannot silently inherit the same account card.
+    var identityAliases: [String]? = nil
     var label: String?
     /// User-entered names belong to the account and survive source changes and rescans.
     var customLabel: String?
@@ -184,12 +187,27 @@ final class ProviderAccountsStore {
         var changed = false
 
         for observation in observations {
-            let index = updated.firstIndex {
-                $0.family == observation.family && $0.identityKey == observation.identityKey
+            let match = Self.matchingRecord(
+                for: observation,
+                in: updated,
+                observations: observations
+            )
+            if case .ambiguous = match {
+                AppLog.warn(.config, "accounts: claude identity omitted its organization while multiple organizations share the login; observation quarantined")
+                continue
             }
-            if let index {
+            if case .existing(let index) = match {
                 guard !updated[index].removedTombstone else { continue }
                 var record = updated[index]
+                if record.identityKey != observation.identityKey {
+                    var aliases = record.identityAliases ?? []
+                    if !aliases.contains(record.identityKey) {
+                        aliases.append(record.identityKey)
+                    }
+                    aliases.removeAll { $0 == observation.identityKey }
+                    record.identityAliases = aliases.isEmpty ? nil : aliases
+                    record.identityKey = observation.identityKey
+                }
                 record.label = observation.label ?? record.label
                 // A source added by a newer app must survive this build's narrower discovery pass.
                 // Known sources, by contrast, are authoritative for the current launch: keeping a
@@ -234,6 +252,74 @@ final class ProviderAccountsStore {
             persist()
         }
         return records
+    }
+
+    private enum RecordMatch {
+        case existing(Int)
+        case newRecord
+        case ambiguous
+    }
+
+    /// Claude's account UUID can appear either alone or with its organization UUID. Treat those as
+    /// one account only when the user's complete persisted and incoming history proves exactly one
+    /// possible organization; two different explicit organizations are always separate accounts.
+    private static func matchingRecord(
+        for observation: AccountObservation,
+        in records: [ProviderAccountRecord],
+        observations: [AccountObservation]
+    ) -> RecordMatch {
+        guard observation.family == "claude" else {
+            if let index = records.firstIndex(where: {
+                $0.family == observation.family && $0.identityKey == observation.identityKey
+            }) {
+                return .existing(index)
+            }
+            return .newRecord
+        }
+
+        let observed = claudeIdentityParts(observation.identityKey)
+        let familyRecords = records.enumerated().filter { _, record in
+            record.family == observation.family
+                && claudeIdentityParts(record.identityKey).user == observed.user
+        }
+        var organizations = Set(familyRecords.flatMap { _, record in
+            ([record.identityKey] + (record.identityAliases ?? [])).compactMap {
+                claudeIdentityParts($0).organization
+            }
+        })
+        for candidate in observations where candidate.family == observation.family {
+            let parts = claudeIdentityParts(candidate.identityKey)
+            if parts.user == observed.user, let organization = parts.organization {
+                organizations.insert(organization)
+            }
+        }
+
+        if observed.organization == nil, organizations.count > 1 {
+            return .ambiguous
+        }
+        if let exact = familyRecords.first(where: { _, record in
+            record.identityKey == observation.identityKey
+        }) {
+            return .existing(exact.offset)
+        }
+        guard organizations.count <= 1 else { return .newRecord }
+
+        let compatible = familyRecords.filter { _, record in
+            let existing = claudeIdentityParts(record.identityKey)
+            return existing.organization == nil || observed.organization == nil
+        }
+        guard compatible.count == 1 else {
+            return compatible.isEmpty ? .newRecord : .ambiguous
+        }
+        return .existing(compatible[0].offset)
+    }
+
+    private static func claudeIdentityParts(_ identityKey: String) -> (user: String, organization: String?) {
+        let parts = identityKey.lowercased().split(separator: "|", maxSplits: 1)
+        return (
+            user: String(parts.first ?? ""),
+            organization: parts.count == 2 ? String(parts[1]) : nil
+        )
     }
 
     func record(for cardID: String) -> ProviderAccountRecord? {

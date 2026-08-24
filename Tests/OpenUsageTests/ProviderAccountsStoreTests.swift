@@ -71,6 +71,141 @@ final class ProviderAccountsStoreTests: XCTestCase {
         XCTAssertEqual(old?.sources.contains(where: \.holdsDefaultSource), false, "the badge is exclusive per family")
     }
 
+    func testOrganizationAppearingPreservesTheOriginalCardAndCustomName() {
+        let defaults = makeScratchDefaults()
+        let store = ProviderAccountsStore(defaults: defaults)
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a", label: "before@example.com"),
+        ])
+        store.rename(cardID: "claude", to: "My Claude")
+
+        let records = store.reconcile(with: [
+            defaultHomeObservation(
+                family: "claude",
+                identityKey: "acct-a|org-work",
+                label: "after@example.com (Work)"
+            ),
+        ])
+
+        XCTAssertEqual(records.count, 1, "a newly reported organization must not mint a duplicate card")
+        XCTAssertEqual(records[0].id, "claude")
+        XCTAssertEqual(records[0].identityKey, "acct-a|org-work")
+        XCTAssertEqual(records[0].identityAliases, ["acct-a"])
+        XCTAssertEqual(records[0].customLabel, "My Claude")
+        XCTAssertEqual(store.defaultBadgeHolder(family: "claude")?.id, "claude")
+
+        let reloaded = ProviderAccountsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.record(for: "claude")?.identityKey, "acct-a|org-work")
+        XCTAssertEqual(reloaded.resolvedDisplayName(cardID: "claude"), "My Claude")
+    }
+
+    func testOrganizationDisappearingPreservesTheOriginalCardAndKnownOrganization() {
+        let defaults = makeScratchDefaults()
+        let store = ProviderAccountsStore(defaults: defaults)
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a|org-work"),
+        ])
+        store.rename(cardID: "claude", to: "Work Account")
+
+        let records = store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a"),
+        ])
+
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].id, "claude")
+        XCTAssertEqual(records[0].identityKey, "acct-a")
+        XCTAssertEqual(records[0].identityAliases, ["acct-a|org-work"])
+        XCTAssertEqual(records[0].customLabel, "Work Account")
+
+        let reloaded = ProviderAccountsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.record(for: "claude")?.identityAliases, ["acct-a|org-work"])
+        XCTAssertEqual(reloaded.resolvedDisplayName(cardID: "claude"), "Work Account")
+    }
+
+    func testTwoExplicitOrganizationsForTheSameUserRemainDistinct() {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a|org-work"),
+        ])
+        store.rename(cardID: "claude", to: "Work")
+
+        let records = store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a|org-personal"),
+        ])
+
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(store.record(for: "claude")?.identityKey, "acct-a|org-work")
+        XCTAssertEqual(store.record(for: "claude")?.customLabel, "Work")
+        XCTAssertEqual(
+            records.first { $0.identityKey == "acct-a|org-personal" }?.id,
+            ProviderAccountID.make(family: "claude", identityKey: "acct-a|org-personal")
+        )
+    }
+
+    func testOrganizationLessObservationIsQuarantinedWhenMultipleOrganizationsExist() {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a|org-work"),
+            ProviderAccountsStore.AccountObservation(
+                family: "claude",
+                identityKey: "acct-a|org-personal",
+                label: nil,
+                sources: [ProviderAccountSource(kind: .desktop, anchor: nil, holdsDefaultSource: false)]
+            ),
+        ])
+        let original = store.records
+
+        let records = store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a"),
+        ])
+
+        XCTAssertEqual(records, original, "an unidentified organization must not claim either account")
+        XCTAssertEqual(store.defaultBadgeHolder(family: "claude")?.identityKey, "acct-a|org-work")
+    }
+
+    func testMultipleIncomingOrganizationsCannotClaimAnExistingOrganizationLessAccount() {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a"),
+        ])
+
+        let records = store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a|org-work"),
+            ProviderAccountsStore.AccountObservation(
+                family: "claude",
+                identityKey: "acct-a|org-personal",
+                label: nil,
+                sources: [ProviderAccountSource(kind: .desktop, anchor: nil, holdsDefaultSource: false)]
+            ),
+        ])
+
+        XCTAssertEqual(records.count, 3)
+        XCTAssertEqual(store.record(for: "claude")?.identityKey, "acct-a")
+        XCTAssertNotNil(records.first { $0.identityKey == "acct-a|org-work" })
+        XCTAssertNotNil(records.first { $0.identityKey == "acct-a|org-personal" })
+    }
+
+    func testRememberedOrganizationPreventsLaterDifferentOrganizationFromTakingTheCard() {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a|org-work"),
+        ])
+        store.rename(cardID: "claude", to: "Work")
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a"),
+        ])
+
+        let records = store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "acct-a|org-personal"),
+        ])
+
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(store.record(for: "claude")?.identityKey, "acct-a")
+        XCTAssertEqual(store.record(for: "claude")?.customLabel, "Work")
+        XCTAssertEqual(store.record(for: "claude")?.identityAliases, ["acct-a|org-work"])
+        XCTAssertNotNil(records.first { $0.identityKey == "acct-a|org-personal" })
+    }
+
     func testUnobservedFamilyIsLeftUntouched() {
         let defaults = makeScratchDefaults()
         let store = ProviderAccountsStore(defaults: defaults)
