@@ -117,23 +117,82 @@ final class CodexAccountCloudSyncTests: XCTestCase {
         XCTAssertFalse(carriedOldHistory)
     }
 
-    func testCredentialLosingItsIdentityClearsPreviousCloudAttribution() async throws {
+    func testSameCredentialLosingItsIdentityPreservesVerifiedCloudHistory() async throws {
+        let history = historicalUsage()
         let fixture = try makeFixture(
             keychainAuth: authJSON(accountID: "ACCOUNT-A"),
-            includeHistory: true
+            includeHistory: false,
+            initialIdentity: "account-a",
+            cachedHistory: history
         )
         _ = await fixture.store.refresh(providerID: "codex", force: true)
         XCTAssertEqual(fixture.cache.producedByIdentityKey(providerID: "codex"), "account-a")
+        XCTAssertEqual(fixture.store.localSnapshots["codex"]?.usageHistory, history)
 
         fixture.keychain.value = try authJSON(accountID: nil)
         let outcome = await fixture.store.refresh(providerID: "codex", force: true)
 
         XCTAssertEqual(outcome, .refreshed)
         XCTAssertNil(fixture.provider.lastSuccessfulIdentityKey)
+        XCTAssertEqual(fixture.cache.producedByIdentityKey(providerID: "codex"), "account-a")
+        XCTAssertEqual(fixture.store.localSnapshots["codex"]?.usageHistory, history)
+        let document = fixture.store.localHistoryDocument(deviceID: "this-mac", deviceName: "This Mac")
+        XCTAssertEqual(document.providers["codex"], history)
+        XCTAssertEqual(document.identities?["codex"], "account-a")
+    }
+
+    func testDifferentIdentitylessCredentialQuarantinesPreviousAccountHistory() async throws {
+        let history = historicalUsage()
+        let fixture = try makeFixture(
+            keychainAuth: authJSON(accessToken: "account-a-token", accountID: "ACCOUNT-A"),
+            includeHistory: false,
+            initialIdentity: "account-a",
+            cachedHistory: history
+        )
+        _ = await fixture.store.refresh(providerID: "codex", force: true)
+        XCTAssertEqual(fixture.store.localSnapshots["codex"]?.usageHistory, history)
+
+        fixture.keychain.value = try authJSON(accessToken: "different-account-token", accountID: nil)
+        let outcome = await fixture.store.refresh(providerID: "codex", force: true)
+
+        XCTAssertEqual(outcome, .refreshed)
+        XCTAssertNil(fixture.provider.lastSuccessfulIdentityKey)
         XCTAssertNil(fixture.cache.producedByIdentityKey(providerID: "codex"))
-        XCTAssertNil(
-            fixture.store.localHistoryDocument(deviceID: "this-mac", deviceName: "This Mac")
-                .providers["codex"]
+        XCTAssertNil(fixture.store.localSnapshots["codex"]?.usageHistory)
+        let document = fixture.store.localHistoryDocument(deviceID: "this-mac", deviceName: "This Mac")
+        XCTAssertNil(document.providers["codex"])
+        XCTAssertNil(document.identities?["codex"])
+    }
+
+    func testLaunchVerifiedIdentitySurvivesFirstCredentialMetadataMiss() async throws {
+        let history = historicalUsage()
+        let fixture = try makeFixture(
+            keychainAuth: authJSON(accountID: nil),
+            includeHistory: false,
+            initialIdentity: "launch-account",
+            cachedHistory: history
+        )
+        XCTAssertNil(fixture.provider.lastSuccessfulCredentialFingerprint)
+
+        let outcome = await fixture.store.refresh(providerID: "codex", force: true)
+
+        XCTAssertEqual(outcome, .refreshed)
+        XCTAssertNil(fixture.provider.lastSuccessfulIdentityKey)
+        XCTAssertNotNil(fixture.provider.lastSuccessfulCredentialFingerprint)
+        XCTAssertEqual(fixture.cache.producedByIdentityKey(providerID: "codex"), "launch-account")
+        XCTAssertEqual(fixture.store.localSnapshots["codex"]?.usageHistory, history)
+        let document = fixture.store.localHistoryDocument(deviceID: "this-mac", deviceName: "This Mac")
+        XCTAssertEqual(document.providers["codex"], history)
+        XCTAssertEqual(document.identities?["codex"], "launch-account")
+    }
+
+    private func historicalUsage() -> ProviderUsageHistory {
+        ProviderUsageHistory(
+            series: DailyUsageSeries(daily: [
+                DailyUsageEntry(date: "2000-01-01", totalTokens: 987_654_321, costUSD: 1234)
+            ]),
+            modelUsage: nil,
+            unknownModelsByDay: [:]
         )
     }
 

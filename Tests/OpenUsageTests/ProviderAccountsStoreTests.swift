@@ -71,6 +71,90 @@ final class ProviderAccountsStoreTests: XCTestCase {
         XCTAssertEqual(old?.sources.contains(where: \.holdsDefaultSource), false, "the badge is exclusive per family")
     }
 
+    func testCodexRuntimePresentationFollowsTheCurrentDefaultAccount() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        store.reconcile(with: [
+            defaultHomeObservation(family: "codex", identityKey: "account-a", label: "alice@example.com")
+        ])
+        store.rename(cardID: "codex", to: "Alice's Codex")
+
+        store.reconcile(with: [
+            defaultHomeObservation(family: "codex", identityKey: "account-b", label: "bob@example.com")
+        ])
+
+        let active = try XCTUnwrap(store.runtimeRecord(for: "codex"))
+        XCTAssertEqual(active.identityKey, "account-b")
+        XCTAssertNotEqual(active.id, "codex", "the runtime alias must not change permanent account ids")
+        XCTAssertEqual(store.record(for: "codex")?.identityKey, "account-a")
+        XCTAssertEqual(store.record(for: "codex")?.customLabel, "Alice's Codex")
+        XCTAssertEqual(store.derivedDisplayName(cardID: "codex"), "Codex — bob@example.com")
+        XCTAssertEqual(store.resolvedDisplayName(cardID: "codex"), "Codex — bob@example.com")
+        XCTAssertEqual(store.resolvedDisplayNamesByCardID["codex"], "Codex — bob@example.com")
+    }
+
+    func testRenamingCodexRuntimeUpdatesOnlyItsCurrentAccountAndSurvivesSwitchBack() throws {
+        let defaults = makeScratchDefaults()
+        let store = ProviderAccountsStore(defaults: defaults)
+        store.reconcile(with: [
+            defaultHomeObservation(family: "codex", identityKey: "account-a", label: "alice@example.com")
+        ])
+        store.rename(cardID: "codex", to: "Alice")
+        store.reconcile(with: [
+            defaultHomeObservation(family: "codex", identityKey: "account-b", label: "bob@example.com")
+        ])
+
+        store.rename(cardID: "codex", to: "Bob")
+
+        let accountBID = try XCTUnwrap(store.runtimeRecord(for: "codex")?.id)
+        XCTAssertEqual(store.record(for: "codex")?.customLabel, "Alice")
+        XCTAssertEqual(store.record(for: accountBID)?.customLabel, "Bob")
+        XCTAssertEqual(store.resolvedDisplayName(cardID: "codex"), "Bob")
+        XCTAssertEqual(store.resolvedDisplayNamesByCardID["codex"], "Bob")
+        XCTAssertEqual(ProviderAccountsStore(defaults: defaults).record(for: accountBID)?.customLabel, "Bob")
+
+        store.reconcile(with: [
+            defaultHomeObservation(family: "codex", identityKey: "account-a", label: "alice@example.com")
+        ])
+
+        XCTAssertEqual(store.runtimeRecord(for: "codex")?.identityKey, "account-a")
+        XCTAssertEqual(store.resolvedDisplayName(cardID: "codex"), "Alice")
+        XCTAssertEqual(store.record(for: accountBID)?.customLabel, "Bob")
+    }
+
+    func testUnverifiedCodexRuntimeCannotBorrowAPreviousAccountsName() {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        store.reconcile(with: [
+            defaultHomeObservation(family: "codex", identityKey: "account-a", label: "alice@example.com")
+        ])
+        store.rename(cardID: "codex", to: "Alice")
+        store.clearDefaultSource(family: "codex")
+
+        XCTAssertNil(store.runtimeRecord(for: "codex"))
+        XCTAssertNil(store.resolvedDisplayName(cardID: "codex"))
+        XCTAssertNil(store.resolvedDisplayNamesByCardID["codex"])
+
+        store.rename(cardID: "codex", to: "Another Account")
+        XCTAssertEqual(store.record(for: "codex")?.customLabel, "Alice")
+    }
+
+    func testClaudeRuntimePresentationKeepsItsPermanentCardAfterDefaultMoves() {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "account-a", label: "alice@example.com")
+        ])
+        store.rename(cardID: "claude", to: "Alice")
+        store.reconcile(with: [
+            defaultHomeObservation(family: "claude", identityKey: "account-b", label: "bob@example.com")
+        ])
+
+        XCTAssertEqual(store.runtimeRecord(for: "claude")?.identityKey, "account-a")
+        XCTAssertEqual(store.resolvedDisplayName(cardID: "claude"), "Alice")
+
+        store.rename(cardID: "claude", to: "Alice's Claude")
+        XCTAssertEqual(store.record(for: "claude")?.customLabel, "Alice's Claude")
+        XCTAssertNil(store.defaultBadgeHolder(family: "claude")?.customLabel)
+    }
+
     func testOrganizationAppearingPreservesTheOriginalCardAndCustomName() {
         let defaults = makeScratchDefaults()
         let store = ProviderAccountsStore(defaults: defaults)

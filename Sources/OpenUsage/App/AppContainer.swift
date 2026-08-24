@@ -272,7 +272,7 @@ final class AppContainer {
     }
 
     func canRename(_ providerID: String) -> Bool {
-        accounts.record(for: providerID) != nil
+        accounts.runtimeRecord(for: providerID) != nil
     }
 
     /// Re-runs first-launch credential detection on demand — the enablement half of the Customize

@@ -37,7 +37,9 @@ identify an account, two cards claim the same account, or an older Mac sends acc
 identity information, that history is temporarily left out instead of being assigned to the wrong
 card. Once the account can be identified, its history joins the matching card again. A Codex login kept
 in the system keychain proves its identity during its normal successful refresh, so its history starts
-syncing afterward without an extra Keychain read or a new permission prompt.
+syncing afterward without an extra Keychain read or a new permission prompt. If that same verified
+credential temporarily stops reporting its account identifier, syncing continues; a different credential
+without an identifiable owner stays excluded until its account can be verified.
 
 An account you use on another Mac but have no login for here doesn't become a card. If this Mac already
 has another enabled, verified account from the same provider, the remote account appears as its own

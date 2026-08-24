@@ -215,7 +215,7 @@ private struct CardNameSection: View {
     }
 
     private var record: ProviderAccountRecord? {
-        container.accounts.records.first { $0.id == providerID }
+        container.accounts.runtimeRecord(for: providerID)
     }
 
     private var placeholder: String {

@@ -326,10 +326,20 @@ final class ProviderAccountsStore {
         records.first { $0.id == cardID }
     }
 
+    /// Claude runtimes follow their permanent account-card ids, while the single Codex runtime
+    /// still keeps its historical bare id when another recorded account takes the default home.
+    /// Resolve that one presentation alias to its current verified owner, never to the old record.
+    func runtimeRecord(for cardID: String) -> ProviderAccountRecord? {
+        if cardID == "codex" {
+            return defaultBadgeHolder(family: "codex")
+        }
+        return record(for: cardID)
+    }
+
     /// The contextual default title, shared by baked providers, visible cards, API output, and the
     /// Customize name placeholder. Stable identity suffixes distinguish duplicate organization names.
     func derivedDisplayName(cardID: String) -> String? {
-        guard let record = record(for: cardID) else { return nil }
+        guard let record = runtimeRecord(for: cardID) else { return nil }
         let familyRecords = records.filter {
             $0.family == record.family && !$0.removedTombstone
         }
@@ -348,7 +358,7 @@ final class ProviderAccountsStore {
     }
 
     func resolvedDisplayName(cardID: String) -> String? {
-        guard let record = record(for: cardID) else { return nil }
+        guard let record = runtimeRecord(for: cardID) else { return nil }
         return record.customLabel?.nilIfEmpty ?? derivedDisplayName(cardID: cardID)
     }
 
@@ -359,7 +369,9 @@ final class ProviderAccountsStore {
     }
 
     func rename(cardID: String, to name: String?) {
-        guard let index = records.firstIndex(where: { $0.id == cardID }) else { return }
+        guard let record = runtimeRecord(for: cardID),
+              let index = records.firstIndex(where: { $0.id == record.id })
+        else { return }
         let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         guard records[index].customLabel != trimmed else { return }
         records[index].customLabel = trimmed

@@ -14,7 +14,8 @@ name, metric choices, menu-bar stars, and position stay with that account instea
 login location. If an account temporarily disappears, its card stays hidden until a verified login
 for that same account returns. Account cards use their organization names when more than one account
 is present, so a work account and its personal counterpart can appear as **Claude — SUNSTORY** and
-**Claude — Personal** even when both use the same email address.
+**Claude — Personal** even when both use the same email address. Codex still uses a single card;
+if its verified account changes, that card's name and custom label follow the current account.
 
 Each provider card leads with its **Always Visible** metrics. Any metrics you've moved below the **On Demand** line are tucked away behind the in-card caret — click it to reveal them below the caret, click again to collapse. Open cards stay open across popover closes and app restarts. A provider with neither On Demand metrics nor quick links shows no caret.
 

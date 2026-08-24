@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 @MainActor
@@ -21,6 +22,9 @@ final class CodexProvider: ProviderRuntime {
     /// Keychain-backed accounts cannot be identified during prompt-free launch discovery, but a
     /// normal refresh already reads that credential and can safely expose its account id afterward.
     private(set) var lastSuccessfulIdentityKey: String?
+    /// In-memory digest of the winning access token, so temporarily missing account metadata can
+    /// retain a previously proven owner only while the successful credential itself stays unchanged.
+    private(set) var lastSuccessfulCredentialFingerprint: Data?
 
     init(
         authStore: CodexAuthStore = CodexAuthStore(),
@@ -169,6 +173,7 @@ final class CodexProvider: ProviderRuntime {
 
         MetricLine.appendNoDataIfNeeded(&mapped.lines)
         lastSuccessfulIdentityKey = Self.accountIdentityKey(from: authState.auth)
+        lastSuccessfulCredentialFingerprint = Data(SHA256.hash(data: Data(currentToken.utf8)))
         return ProviderSnapshot.make(
             provider: provider,
             plan: mapped.plan,

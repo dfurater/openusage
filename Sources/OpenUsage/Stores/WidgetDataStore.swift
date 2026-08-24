@@ -319,6 +319,8 @@ final class WidgetDataStore {
         refreshingProviderIDs.insert(providerID)
         defer { refreshingProviderIDs.remove(providerID) }
         let start = monotonicNow()
+        let previousCodexCredentialFingerprint = (provider as? CodexProvider)?
+            .lastSuccessfulCredentialFingerprint
         // A provider that never returns would otherwise hold the in-flight entry — and the spinner —
         // forever. Past the deadline, stop waiting and treat it as any other failed refresh.
         guard var snapshot = await ProviderRefreshDeadline.snapshot(
@@ -362,13 +364,22 @@ final class WidgetDataStore {
         failureRetryAfter[providerID] = nil
 
         if let codex = provider as? CodexProvider {
-            let verifiedIdentity = codex.lastSuccessfulIdentityKey
-            if providerIdentityKeys[providerID] != verifiedIdentity {
-                // A snapshot loaded while this identity was unknown, or produced by a different
-                // account, must never supply carry-forward history to the newly verified account.
+            if let verifiedIdentity = codex.lastSuccessfulIdentityKey {
+                if providerIdentityKeys[providerID] != verifiedIdentity {
+                    // A snapshot loaded while this identity was unknown, or produced by a different
+                    // account, must never supply carry-forward history to the newly verified account.
+                    localSnapshots.removeValue(forKey: providerID)
+                    providerIdentityKeys[providerID] = verifiedIdentity
+                    AppLog.info(.config, "accounts: codex identity updated from its successful credential")
+                }
+            } else if let previousFingerprint = previousCodexCredentialFingerprint,
+                      previousFingerprint != codex.lastSuccessfulCredentialFingerprint
+            {
+                // Missing account metadata is harmless while the same credential still succeeds,
+                // but a different identityless credential may belong to another account entirely.
                 localSnapshots.removeValue(forKey: providerID)
-                providerIdentityKeys[providerID] = verifiedIdentity
-                AppLog.info(.config, "accounts: codex identity updated from its successful credential")
+                providerIdentityKeys.removeValue(forKey: providerID)
+                AppLog.warn(.config, "accounts: codex credential changed without a verified identity; history quarantined")
             }
         }
 
