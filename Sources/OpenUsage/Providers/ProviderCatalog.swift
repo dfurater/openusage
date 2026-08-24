@@ -29,9 +29,12 @@ enum ProviderCatalog {
                 )
             ))
         } else if !claudeCards.isEmpty {
-            let allowsUnpinnedDesktopFallback = claudeCards.count == 1
-                && defaultClaudeCoworkRoots == nil
             for card in claudeCards {
+                let allowsUnpinnedDesktopFallback = claudeCards.count == 1
+                    && (
+                        defaultClaudeCoworkRoots == nil
+                            || card.allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan
+                    )
                 runtimes.append(claudeAccountRuntime(
                     card: card,
                     allowsUnpinnedDesktopFallback: allowsUnpinnedDesktopFallback
@@ -68,8 +71,9 @@ enum ProviderCatalog {
                 .dropFirst().first.map(String.init)
             authStore = ClaudeAuthStore(
                 scope: .standard,
-                standardDesktopOrganization: organization,
-                allowsUnpinnedStandardDesktopFallback: allowsUnpinnedDesktopFallback
+                standardDesktopOrganization: card.hasAmbiguousDesktopOrganization ? nil : organization,
+                allowsUnpinnedStandardDesktopFallback:
+                    !card.hasAmbiguousDesktopOrganization && allowsUnpinnedDesktopFallback
             )
             scanner = ClaudeLogUsageScanner(
                 cacheIdentityOverride: card.id == "claude" ? nil : "claude-account:\(card.id)",

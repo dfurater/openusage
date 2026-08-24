@@ -532,6 +532,15 @@ final class ProviderAccountAssemblyTests: XCTestCase {
         let defaultCard = try XCTUnwrap(assembly.claudeCards.first { $0.id == "claude" })
         XCTAssertEqual(defaultCard.coworkRootsOverride, [])
         XCTAssertEqual(assembly.defaultClaudeCoworkRoots, [])
+        XCTAssertFalse(defaultCard.allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan)
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first { $0.provider.id == defaultCard.id }
+        )
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
     }
 
     func testTruncatedCoworkWalkWithOneKnownAccountStillWithholdsUnverifiedSandboxes() throws {
@@ -556,6 +565,265 @@ final class ProviderAccountAssemblyTests: XCTestCase {
         XCTAssertEqual(assembly.claudeCards.count, 1)
         XCTAssertEqual(defaultCard.coworkRootsOverride, [])
         XCTAssertEqual(assembly.defaultClaudeCoworkRoots, [])
+        XCTAssertFalse(defaultCard.allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan)
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertEqual(runtime.authStore.standardDesktopOrganization, "org-a")
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
+    }
+
+    func testTruncatedCoworkWalkKeepsOrglessSingleAccountDesktopAuthButWithholdsLogs() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A"}}"#
+        )
+        let truncatedCowork = makeCoworkDiscovery(
+            files: [:],
+            sandboxes: ["/Users/dev/cowork/unknown/.claude"],
+            timeBudget: -1
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            coworkDiscovery: truncatedCowork
+        )
+
+        let defaultCard = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertEqual(defaultCard.identityKey, "account-a")
+        XCTAssertEqual(defaultCard.coworkRootsOverride, [])
+        XCTAssertEqual(assembly.defaultClaudeCoworkRoots, [])
+        XCTAssertTrue(defaultCard.allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan)
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertNil(runtime.authStore.standardDesktopOrganization)
+        XCTAssertTrue(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
+    }
+
+    func testTruncatedCoworkWalkWithPersistedOtherAccountRejectsUnpinnedDesktopAuth() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A"}}"#
+        )
+        let config = "/Users/dev/.claude-work"
+        let discovery = makeDiscovery(
+            files: [
+                config + "/.claude.json":
+                    #"{"oauthAccount":{"accountUuid":"ACCOUNT-B","organizationUuid":"ORG-B"}}"#,
+                config + "/.credentials.json":
+                    #"{"claudeAiOauth":{"accessToken":"work-token"}}"#,
+            ],
+            subdirectories: [config]
+        )
+        _ = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            claudeDiscovery: discovery
+        )
+        let truncatedCowork = makeCoworkDiscovery(
+            files: [:],
+            sandboxes: ["/Users/dev/cowork/unknown/.claude"],
+            timeBudget: -1
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            coworkDiscovery: truncatedCowork
+        )
+
+        let defaultCard = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertEqual(defaultCard.coworkRootsOverride, [])
+        XCTAssertFalse(defaultCard.allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan)
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
+    }
+
+    func testTruncatedCoworkWalkIgnoresRemovedAccountsWhenAuthorizingDesktopFallback() throws {
+        let defaults = makeScratchDefaults()
+        let persisted = [
+            ProviderAccountRecord(
+                id: "claude",
+                family: "claude",
+                identityKey: "account-a",
+                label: nil,
+                sources: [
+                    ProviderAccountSource(
+                        kind: .defaultHome,
+                        anchor: "/Users/dev/.claude",
+                        holdsDefaultSource: true
+                    ),
+                ]
+            ),
+            ProviderAccountRecord(
+                id: "claude@deadbeef",
+                family: "claude",
+                identityKey: "account-b|org-b",
+                label: nil,
+                sources: [],
+                removedTombstone: true
+            ),
+        ]
+        defaults.set(try JSONEncoder().encode(persisted), forKey: ProviderAccountsStore.storageKey)
+        let store = ProviderAccountsStore(defaults: defaults)
+        let truncatedCowork = makeCoworkDiscovery(
+            files: [:],
+            sandboxes: ["/Users/dev/cowork/unknown/.claude"],
+            timeBudget: -1
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: makeClaudeObserver(#"{"oauthAccount":{"accountUuid":"ACCOUNT-A"}}"#),
+            accountsStore: store,
+            coworkDiscovery: truncatedCowork
+        )
+
+        let defaultCard = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertTrue(defaultCard.allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan)
+        XCTAssertEqual(defaultCard.coworkRootsOverride, [])
+    }
+
+    func testTruncatedCoworkWalkWithObservedOtherAccountRejectsUnpinnedDesktopAuth() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A"}}"#
+        )
+        let partialDiscovery = PreparedProviderAccountDiscovery(
+            config: ClaudeConfigDirDiscovery.Result(),
+            cowork: ClaudeCoworkDiscovery.Result(
+                sandboxes: [
+                    ClaudeCoworkDiscovery.Sandbox(
+                        root: URL(fileURLWithPath: "/Users/dev/cowork/other/.claude"),
+                        identityKey: "account-b|org-b",
+                        organization: "org-b"
+                    ),
+                ],
+                truncated: true
+            )
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            preparedDiscovery: partialDiscovery
+        )
+
+        let defaultCard = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertEqual(defaultCard.coworkRootsOverride, [])
+        XCTAssertFalse(defaultCard.allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan)
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
+    }
+
+    func testTruncatedCoworkWalkWithTwoOrganizationsRejectsOrglessDesktopAuth() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A"}}"#
+        )
+        let partialDiscovery = PreparedProviderAccountDiscovery(
+            config: ClaudeConfigDirDiscovery.Result(),
+            cowork: ClaudeCoworkDiscovery.Result(
+                sandboxes: [
+                    ClaudeCoworkDiscovery.Sandbox(
+                        root: URL(fileURLWithPath: "/Users/dev/cowork/personal/.claude"),
+                        identityKey: "account-a|org-personal",
+                        organization: "org-personal"
+                    ),
+                    ClaudeCoworkDiscovery.Sandbox(
+                        root: URL(fileURLWithPath: "/Users/dev/cowork/work/.claude"),
+                        identityKey: "account-a|org-work",
+                        organization: "org-work"
+                    ),
+                ],
+                truncated: true
+            )
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            preparedDiscovery: partialDiscovery
+        )
+
+        let defaultCard = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertEqual(defaultCard.coworkRootsOverride, [])
+        XCTAssertFalse(defaultCard.allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan)
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
+    }
+
+    func testTruncatedCoworkWalkWithSharedOrgRejectsEvenPinnedDesktopAuth() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"ORG-SHARED"}}"#
+        )
+        let partialDiscovery = PreparedProviderAccountDiscovery(
+            config: ClaudeConfigDirDiscovery.Result(),
+            cowork: ClaudeCoworkDiscovery.Result(
+                sandboxes: [
+                    ClaudeCoworkDiscovery.Sandbox(
+                        root: URL(fileURLWithPath: "/Users/dev/cowork/other/.claude"),
+                        identityKey: "account-b|org-shared",
+                        organization: "org-shared"
+                    ),
+                ],
+                truncated: true
+            )
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            preparedDiscovery: partialDiscovery
+        )
+
+        let defaultCard = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertEqual(defaultCard.coworkRootsOverride, [])
+        XCTAssertTrue(defaultCard.hasAmbiguousDesktopOrganization)
+        XCTAssertFalse(store.records.contains { $0.identityKey == "account-b|org-shared" })
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertNil(runtime.authStore.standardDesktopOrganization)
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
     }
 
     func testDifferentDesktopUsersSharingOneOrganizationCannotBorrowEachOthersToken() throws {
@@ -587,6 +855,85 @@ final class ProviderAccountAssemblyTests: XCTestCase {
         XCTAssertEqual(verifiedAccount.identityKey, "account-a|org-shared")
         XCTAssertEqual(verifiedAccount.coworkRootsOverride?.map(\.path), [verifiedRoot])
         XCTAssertFalse(store.records.contains { $0.identityKey == "account-b|org-shared" })
+        XCTAssertTrue(verifiedAccount.hasAmbiguousDesktopOrganization)
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertNil(runtime.authStore.standardDesktopOrganization)
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
+    }
+
+    func testDefaultUserAndCoworkUserSharingOrgCannotUseUnidentifiedDesktopToken() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"ORG-SHARED"}}"#
+        )
+        let otherRoot = "/Users/dev/cowork/other/.claude"
+        let cowork = makeCoworkDiscovery(
+            files: [
+                otherRoot + "/.claude.json":
+                    #"{"oauthAccount":{"accountUuid":"ACCOUNT-B","organizationUuid":"ORG-SHARED"}}"#,
+            ],
+            sandboxes: [otherRoot]
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            coworkDiscovery: cowork,
+            hasDesktopCredentialMaterial: { true }
+        )
+
+        let defaultCard = try XCTUnwrap(assembly.claudeCards.first)
+        XCTAssertEqual(assembly.claudeCards.count, 1)
+        XCTAssertEqual(defaultCard.identityKey, "account-a|org-shared")
+        XCTAssertEqual(defaultCard.coworkRootsOverride, [])
+        XCTAssertTrue(defaultCard.hasAmbiguousDesktopOrganization)
+        XCTAssertFalse(store.records.contains { $0.identityKey == "account-b|org-shared" })
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertNil(runtime.authStore.standardDesktopOrganization)
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
+    }
+
+    func testPersistedUserSharingCoworkOrganizationQuarantinesDesktopOnlyCard() throws {
+        let store = ProviderAccountsStore(defaults: makeScratchDefaults())
+        _ = ProviderAccountAssembly.make(
+            observer: makeClaudeObserver(
+                #"{"oauthAccount":{"accountUuid":"ACCOUNT-A","organizationUuid":"ORG-SHARED"}}"#
+            ),
+            accountsStore: store
+        )
+        let observer = makeClaudeObserver(
+            #"{"oauthAccount":{"accountUuid":"ACCOUNT-C","organizationUuid":"ORG-OTHER"}}"#
+        )
+        let coworkRoot = "/Users/dev/cowork/other/.claude"
+        let cowork = makeCoworkDiscovery(
+            files: [
+                coworkRoot + "/.claude.json":
+                    #"{"oauthAccount":{"accountUuid":"ACCOUNT-B","organizationUuid":"ORG-SHARED"}}"#,
+            ],
+            sandboxes: [coworkRoot]
+        )
+
+        let assembly = ProviderAccountAssembly.make(
+            observer: observer,
+            accountsStore: store,
+            coworkDiscovery: cowork,
+            hasDesktopCredentialMaterial: { true }
+        )
+
+        XCTAssertEqual(assembly.claudeCards.map(\.identityKey), ["account-c|org-other"])
+        XCTAssertFalse(store.records.contains { $0.identityKey == "account-b|org-shared" })
     }
 
     func testDistinctCoworkAccountWithoutOrganizationNeverBorrowsDefaultSpend() throws {
@@ -613,6 +960,14 @@ final class ProviderAccountAssemblyTests: XCTestCase {
         XCTAssertEqual(assembly.claudeCards.count, 1)
         XCTAssertEqual(assembly.claudeCards.first?.coworkRootsOverride, [])
         XCTAssertEqual(store.records.count, 1)
+
+        let runtime = try XCTUnwrap(
+            ProviderCatalog.make(
+                claudeCards: assembly.claudeCards,
+                defaultClaudeCoworkRoots: assembly.defaultClaudeCoworkRoots
+            ).compactMap { $0 as? ClaudeProvider }.first
+        )
+        XCTAssertFalse(runtime.authStore.allowsUnpinnedStandardDesktopFallback)
     }
 
     func testUnresolvedDefaultLogoutKeepsIndependentlyVerifiedDesktopAndConfigAccounts() throws {

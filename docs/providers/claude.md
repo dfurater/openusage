@@ -57,8 +57,11 @@ Cowork session folders are assigned to the account named by their own Claude sta
 Claude Desktop account needs at least one Cowork session identifying its organization and a matching
 cached Desktop login; signing into Desktop alone does not create a card. Desktop credentials are
 pinned to their organization, so switching Desktop's active organization cannot make a card borrow
-another account's usage. Sessions without a provable owner are left unassigned when multiple accounts
-are present. Old Cowork sessions can keep a signed-out organization visible with a login warning.
+another account's usage. If different users share the same organization, its Desktop login is not used
+until the owner can be verified. Sessions without a provable owner are left unassigned when multiple
+accounts are present. An incomplete session scan temporarily withholds Desktop spend history while a
+verified single-account login can still show its live limits. Old Cowork sessions can keep a signed-out
+organization visible with a login warning.
 
 Changes to the default Claude Code login are detected within about five seconds; custom folders,
 Desktop logins, and new Cowork sessions are checked about once a minute. Existing sessions update on

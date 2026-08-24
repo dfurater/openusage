@@ -21,6 +21,13 @@ struct ClaudeAccountCard: Equatable, Sendable {
     /// Once multiple accounts exist, an explicit partition prevents foreign or unidentified Cowork
     /// sandboxes from leaking into the default-home runtime's standard scan.
     var coworkRootsOverride: [URL]?
+    /// A truncated Cowork walk still withholds every sandbox log, but the historical unpinned
+    /// Desktop credential fallback remains safe enough for one verified, org-less default login
+    /// when neither persisted accounts nor the partial walk names any competing identity.
+    var allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan = false
+    /// Desktop caches tokens by organization rather than user, so an org naming multiple known
+    /// users cannot safely back this card, even when its organization pin is otherwise exact.
+    var hasAmbiguousDesktopOrganization = false
 }
 
 /// Results collected away from the main actor before rebuilding the account graph.
@@ -145,6 +152,12 @@ struct ProviderAccountAssembly {
                 }
             }
         }
+        let desktopPolicy = ClaudeDesktopAccountPolicy(
+            records: accountsStore.records,
+            defaultOutcome: claudeOutcome,
+            configFindings: configScan?.findings ?? [],
+            coworkScan: coworkScan
+        )
 
         // Credential-bearing CLI sources determine the identity spelling a bound provider can
         // actually verify. An org-less default/config state and its one known Cowork org may fold
@@ -258,14 +271,6 @@ struct ProviderAccountAssembly {
         var needsCoworkPartition = false
         var desktopCredentialMaterial: Bool?
         if let coworkScan, !coworkScan.truncated {
-            let desktopUsersByOrganization = coworkScan.sandboxes.reduce(
-                into: [String: Set<String>]()
-            ) { users, sandbox in
-                guard let organization = sandbox.organization?.nilIfEmpty,
-                      let identityKey = sandbox.identityKey
-                else { return }
-                users[organization, default: []].insert(claudeUserID(identityKey))
-            }
             for sandbox in coworkScan.sandboxes {
                 guard let sandboxKey = sandbox.identityKey else {
                     unidentifiedCoworkRoots.append(sandbox.root)
@@ -286,9 +291,9 @@ struct ProviderAccountAssembly {
                 }
 
                 needsCoworkPartition = true
-                let hasAmbiguousDesktopOwner = sandbox.organization.map {
-                    (desktopUsersByOrganization[$0]?.count ?? 0) > 1
-                } ?? false
+                let hasAmbiguousDesktopOwner = desktopPolicy.hasAmbiguousOrganization(
+                    sandbox.organization
+                )
                 let desktopSource = ProviderAccountSource(
                     kind: .desktop,
                     anchor: nil,
@@ -345,6 +350,15 @@ struct ProviderAccountAssembly {
             AppLog.warn(.config, "discovery: cowork scan truncated; cowork spend withheld until a complete scan proves account ownership")
         }
 
+        let hasExactlyOneDefaultAccount = plannedAccounts.count == 1
+            && defaultClaudeKey.flatMap { plannedAccounts[$0]?.credential } == .defaultHome
+        let allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan =
+            desktopPolicy.allowsUnpinnedFallbackDuringIncompleteCoworkScan(
+                defaultIdentity: defaultClaudeKey,
+                hasExactlyOneDefaultAccount: hasExactlyOneDefaultAccount,
+                coworkScan: coworkScan
+            )
+
         // The default observation must be reconciled first, preserving the existing bare-id
         // migration rule; every later source attaches to its own stable account record.
         if claudeOutcome != nil, defaultClaudeKey == nil {
@@ -372,6 +386,11 @@ struct ProviderAccountAssembly {
                   })
             else { continue }
             let isDefaultHome = planned.credential == .defaultHome
+            let desktopOrganization = record.identityKey.split(separator: "|", maxSplits: 1)
+                .dropFirst().first.map(String.init)
+            let hasAmbiguousDesktopOrganization = desktopPolicy.hasAmbiguousOrganization(
+                desktopOrganization
+            )
             let card = ClaudeAccountCard(
                 id: record.id,
                 displayName: accountsStore.derivedDisplayName(cardID: record.id)
@@ -380,7 +399,10 @@ struct ProviderAccountAssembly {
                 credential: planned.credential,
                 logRoots: planned.logRoots,
                 additionalLogRoots: planned.additionalLogRoots,
-                coworkRootsOverride: isDefaultHome && needsCoworkPartition ? defaultCoworkRoots : nil
+                coworkRootsOverride: isDefaultHome && needsCoworkPartition ? defaultCoworkRoots : nil,
+                allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan:
+                    isDefaultHome && allowsUnpinnedDesktopFallbackDuringIncompleteCoworkScan,
+                hasAmbiguousDesktopOrganization: isDefaultHome && hasAmbiguousDesktopOrganization
             )
             claudeCards.append(card)
             identityKeys[record.id] = record.identityKey
