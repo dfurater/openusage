@@ -322,7 +322,8 @@ final class AntigravityProviderTests: XCTestCase {
         let provider = AntigravityProvider(
             authStore: AntigravityAuthStore(keychain: FakeKeychain(wrapped), files: FakeFiles()),
             usageClient: AntigravityUsageClient(lsHTTP: routing, http: routing),
-            discovery: LanguageServerDiscovery(processRunner: EmptyProcessRunner())
+            discovery: LanguageServerDiscovery(processRunner: EmptyProcessRunner()),
+            dbUsageScanner: AntigravityDbUsageScanner(conversationsDirectory: { "/nonexistent-antigravity-tests" })
         )
 
         let snapshot = await provider.refresh()
@@ -456,14 +457,14 @@ final class AntigravityProviderTests: XCTestCase {
 
 /// Returns empty output for every subprocess — makes language-server discovery find nothing, so a
 /// provider test exercises the Cloud Code path deterministically.
-private struct EmptyProcessRunner: ProcessRunning {
+struct EmptyProcessRunner: ProcessRunning {
     func run(executable: String, arguments: [String], environment: [String: String], timeout: TimeInterval) throws -> ProcessResult {
         ProcessResult(exitCode: 0, stdout: "", stderr: "")
     }
 }
 
 /// Serial call counter for routing handlers that must vary their response across requests.
-private final class Counter: @unchecked Sendable {
+final class Counter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
     func next() -> Int {
